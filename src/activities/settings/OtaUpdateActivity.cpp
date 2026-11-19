@@ -29,6 +29,16 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
   requestUpdateAndWait();
 
   const auto res = updater.checkForUpdate();
+  // NO_UPDATE here means the release carries no firmware asset for this board
+  // (expected until per-board assets are published) — not a failure.
+  if (res == OtaUpdater::NO_UPDATE) {
+    LOG_DBG("OTA", "No firmware asset for this board in latest release");
+    {
+      RenderLock lock(*this);
+      state = NO_UPDATE;
+    }
+    return;
+  }
   if (res != OtaUpdater::OK) {
     LOG_DBG("OTA", "Update check failed: %d", res);
     {
@@ -51,6 +61,28 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
     RenderLock lock(*this);
     state = WAITING_CONFIRMATION;
   }
+  const char* options[] = {tr(STR_CANCEL), tr(STR_UPDATE)};
+  // Default the selection to Update so the hardware Confirm button installs,
+  // matching the pre-popup layout (Back = cancel, Confirm = update).
+  confirmPopup.show(tr(STR_NEW_UPDATE), options, 2, 1, [this](const int idx) {
+    if (idx == 1) {
+      // Dual-OS guard: the updater streams into the passive slot, so a bootable image there
+      // (e.g. the other OS) is destroyed by this update. A blank slot skips the extra prompt.
+      boot_switch::PassiveSlotInfo info = {};
+      if (boot_switch::peekPassiveSlot(info)) {
+        char body[64];
+        boot_switch::describeSlot(info, body, sizeof(body));
+        startActivityForResult(std::make_unique<ConfirmationActivity>(
+                                   renderer, mappedInput, tr(STR_OVERWRITE_OTHER_OS_PROMPT), std::string(body)),
+                               [this](const ActivityResult& result) { onOverwriteWarningResult(result); });
+        return;
+      }
+      runUpdateInstall();
+    } else {
+      finish();
+    }
+  });
+  requestUpdate();
 }
 
 void OtaUpdateActivity::onEnter() {
@@ -111,14 +143,15 @@ void OtaUpdateActivity::render(RenderLock&&) {
   if (state == CHECKING_FOR_UPDATE) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_CHECKING_UPDATE));
   } else if (state == WAITING_CONFIRMATION) {
-    renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_NEW_UPDATE), true, EpdFontFamily::BOLD);
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, top + height + metrics.verticalSpacing,
+    // Version info sits in the upper part of the screen so the centered
+    // Cancel/Update popup doesn't cover it (same layout as ConfirmationActivity).
+    const int infoTop = pageHeight / 6;
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop,
                       (std::string(tr(STR_CURRENT_VERSION)) + CROSSPOINT_VERSION).c_str());
-    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, top + height * 2 + metrics.verticalSpacing * 2,
+    renderer.drawText(UI_10_FONT_ID, metrics.contentSidePadding, infoTop + height + metrics.verticalSpacing,
                       (std::string(tr(STR_NEW_VERSION)) + updater.getLatestVersion()).c_str());
 
-    const auto labels = mappedInput.mapLabels(tr(STR_CANCEL), tr(STR_UPDATE), "", "");
-    GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    if (confirmPopup.processRender(renderer, mappedInput)) return;
   } else if (state == UPDATE_IN_PROGRESS) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATING));
 
@@ -141,11 +174,18 @@ void OtaUpdateActivity::render(RenderLock&&) {
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FAILED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_FAILED), true, EpdFontFamily::BOLD);
+    if (failedDetail != nullptr) {
+      renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, failedDetail);
+    }
     const auto labels = mappedInput.mapLabels(tr(STR_BACK), "", "", "");
     GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   } else if (state == FINISHED) {
     renderer.drawCenteredText(UI_10_FONT_ID, top, tr(STR_UPDATE_COMPLETE), true, EpdFontFamily::BOLD);
-    renderer.drawCenteredText(UI_10_FONT_ID, top + height + metrics.verticalSpacing, tr(STR_POWER_ON_HINT));
+    const int hintY = top + height + metrics.verticalSpacing;
+    const Rect hintBounds{metrics.contentSidePadding, hintY, pageWidth - metrics.contentSidePadding * 2,
+                          pageHeight - hintY};
+    UITheme::drawCenteredWrappedText(renderer, hintBounds, UI_10_FONT_ID, tr(STR_POWER_ON_HINT), 3, true,
+                                     EpdFontFamily::REGULAR, UITheme::TextVerticalAlignment::TOP);
   }
 
   renderer.displayBuffer();
@@ -153,15 +193,15 @@ void OtaUpdateActivity::render(RenderLock&&) {
 
 void OtaUpdateActivity::onOverwriteWarningResult(const ActivityResult& result) {
   if (result.isCancelled) {
-    // Stay on the update-available screen; the redraw happens automatically
-    // once this result handler returns (see Activity::startActivityForResult).
+    // The update popup is already dismissed at this point, so leave the OTA screen.
+    finish();
     return;
   }
-  startInstall();
+  runUpdateInstall();
 }
 
-void OtaUpdateActivity::startInstall() {
-  LOG_DBG("OTA", "Starting download...");
+void OtaUpdateActivity::runUpdateInstall() {
+  LOG_DBG("OTA", "New update available, starting download...");
   {
     RenderLock lock(*this);
     state = UPDATE_IN_PROGRESS;
@@ -180,6 +220,7 @@ void OtaUpdateActivity::startInstall() {
     LOG_DBG("OTA", "Update failed: %d", res);
     {
       RenderLock lock(*this);
+      failedDetail = res == OtaUpdater::WRONG_DEVICE_ERROR ? tr(STR_FIRMWARE_WRONG_DEVICE) : nullptr;
       state = FAILED;
     }
     requestUpdate();
@@ -201,39 +242,25 @@ void OtaUpdateActivity::startInstall() {
 
 void OtaUpdateActivity::loop() {
   if (state == WAITING_CONFIRMATION) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Confirm)) {
-      // Dual-OS guard: the updater streams into the passive slot, so a
-      // bootable image there (e.g. the other OS) is destroyed by this update.
-      // A blank slot skips the extra prompt.
-      boot_switch::PassiveSlotInfo info = {};
-      if (boot_switch::peekPassiveSlot(info)) {
-        char body[64];
-        boot_switch::describeSlot(info, body, sizeof(body));
-        startActivityForResult(std::make_unique<ConfirmationActivity>(
-                                   renderer, mappedInput, tr(STR_OVERWRITE_OTHER_OS_PROMPT), std::string(body)),
-                               [this](const ActivityResult& result) { onOverwriteWarningResult(result); });
-        return;
-      }
-      startInstall();
-      return;
-    }
-
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
-      finish();
-    }
-
+    if (confirmPopup.handleInput(mappedInput, [this] { requestUpdate(); })) return;
+    // Popup dismissed without a selection (Back button or tap outside): cancel.
+    finish();
     return;
   }
 
   if (state == FAILED) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    int x = 0;
+    int y = 0;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || mappedInput.wasScreenTapped(x, y)) {
       finish();
     }
     return;
   }
 
   if (state == NO_UPDATE) {
-    if (mappedInput.wasPressed(MappedInputManager::Button::Back)) {
+    int x = 0;
+    int y = 0;
+    if (mappedInput.wasPressed(MappedInputManager::Button::Back) || mappedInput.wasScreenTapped(x, y)) {
       finish();
     }
     return;

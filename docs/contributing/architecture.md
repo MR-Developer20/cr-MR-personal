@@ -154,9 +154,11 @@ Typical persisted areas on SD:
   state.json
 ```
 
-`sections/*.bin` contains rendered pages plus anchor, paragraph, and list-item
-lookup tables used for TOC/footnote jumps and KOReader sync refinement. For
-binary cache formats, see `docs/file-formats.md`.
+`sections/*.bin` contains rendered pages plus anchor, paragraph, list-item, and
+page-start visible-text-offset lookup tables. The offset table makes reading
+positions content-based: KOReader XPaths resolve to an exact chapter offset,
+and the current layout derives the corresponding page. For binary cache
+formats, see `docs/file-formats.md`.
 
 ## Networking architecture
 
@@ -184,7 +186,11 @@ Endpoint reference: `docs/webserver-endpoints.md`.
 
 Some sources are generated and should not be edited manually.
 
-- `scripts/build_html.py` generates `src/network/html/*.generated.h` from HTML files
+- `scripts/build_html.py` generates `src/network/html/**/*.generated.h` from the HTML, JS, CSS, and SVG
+  files under `src/` (today only `src/network/html/`). It minifies JS and CSS with the vendored rjsmin and rcssmin
+  (`scripts/vendor/`), except pre-minified `*.min.js` files. The build stops on JS that rjsmin
+  would corrupt: a template literal nested inside another one's `${...}`, or a regex literal
+  after a character rjsmin does not expect, such as `x => /re/` (write `x => (/re/)`).
 - `scripts/gen_i18n.py` generates `lib/I18n/I18nKeys.h`, `I18nStrings.h`, and `I18nStrings.cpp`
 - `scripts/generate_hyphenation_trie.py` generates hyphenation headers under `lib/Epub/Epub/hyphenation/generated/`
 

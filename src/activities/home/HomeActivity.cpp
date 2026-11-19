@@ -4,17 +4,23 @@
 #include <Epub.h>
 #include <FsHelpers.h>
 #include <GfxRenderer.h>
+#include <HalDisplay.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <LibraryBuilder.h>
+#include <LibraryIndexFile.h>
+#include <Memory.h>
 #include <Utf8.h>
 #include <Xtc.h>
 
+#include <algorithm>
 #include <cstring>
 #include <string>
 #include <vector>
 
 #include "CrossPointSettings.h"
 #include "CrossPointState.h"
+#include "HapticFeedback.h"
 #include "MappedInputManager.h"
 #include "OpdsServerStore.h"
 #include "RecentBooksStore.h"
@@ -25,11 +31,14 @@
 // ---------------------------------------------------------------------------
 // Static carousel frame cache — survives HomeActivity re-creation so that
 // returning to home (e.g. after settings) doesn't re-read covers from SD.
-// Freed in onExit() and again in onSelectBook() before entering the reader.
+// Freed in onExit() and again in onRecentBookSelected() before entering the reader.
 // ---------------------------------------------------------------------------
 namespace {
 uint8_t* gCachedFrames[HomeActivity::kCarouselFrameCount] = {};
 int gCachedFrameBookIdx[HomeActivity::kCarouselFrameCount] = {-1, -1, -1};
+// Night mode keeps images pre-inverted in the framebuffer, so frames baked in one output
+// polarity show covers as negatives in the other.
+bool gCachedFramesInverted = false;
 int gCachedFrameCount = 0;
 std::string gCacheKey;
 
@@ -54,20 +63,29 @@ void invalidateCarouselCache() {
 }  // namespace
 
 int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Recents, File transfer, Settings
+  int count = 4;  // File Browser, Library, File transfer, Settings
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
-  if (hasOpdsServers) {
+  if (slotItem() != HomeMenuItem::NONE) {
     count++;
   }
   return count;
 }
 
+void HomeActivity::appendHomeMenu(std::vector<const char*>& items, std::vector<UIIcon>& icons) const {
+  items = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER), tr(STR_SETTINGS_TITLE)};
+  icons = {Folder, Library, Transfer, Settings};
+  if (slotItem() != HomeMenuItem::NONE) {
+    items.insert(items.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+    icons.insert(icons.begin() + 2, hasPlugins ? Plugins : Book);
+  }
+}
+
 void HomeActivity::loadRecentBooks(int maxBooks) {
   recentBooks.clear();
   const auto& books = RECENT_BOOKS.getBooks();
-  recentBooks.reserve(std::min(static_cast<int>(books.size()), maxBooks));
+  recentBooks.reserve(coverGridUi ? maxBooks : std::min(static_cast<int>(books.size()), maxBooks));
 
   for (const RecentBook& book : books) {
     // Limit to maximum number of recent books
@@ -84,16 +102,116 @@ void HomeActivity::loadRecentBooks(int maxBooks) {
   }
 }
 
+void HomeActivity::fillCoverGridFromLibrary() {
+  if (recentBooks.size() >= CoverGridHomeUi::MAX_BOOKS) return;
+  // Keep the index and record together off the task stack; reuse for every row.
+  struct LibraryReader {
+    library::LibraryIndexFile index;
+    library::ClixRecord record;
+  };
+  auto reader = makeUniqueNoThrow<LibraryReader>();
+  if (!reader) {
+    LOG_ERR("HOME", "OOM: library index");
+    return;
+  }
+  auto& index = reader->index;
+  auto& record = reader->record;
+  if (!index.open(library::libraryIndexPath())) {
+    index.close();
+    GUI.drawPopup(renderer, tr(STR_LIBRARY_REBUILDING));
+    library::BuildStats stats;
+    if (!library::buildLibraryIndex("/", stats, SETTINGS.libraryUseMetadata != 0) ||
+        !index.open(library::libraryIndexPath())) {
+      LOG_ERR("HOME", "Cannot populate cover grid from library");
+      return;
+    }
+  }
+  for (uint16_t row = 0; row < index.bookCount() && recentBooks.size() < CoverGridHomeUi::MAX_BOOKS; ++row) {
+    RecentBook book;
+    if (!index.readRecord(index.ordinalForRow(library::SortOrder::RecentDesc, row), record) ||
+        !index.readPath(record, book.path))
+      continue;
+    if (std::any_of(recentBooks.begin(), recentBooks.end(),
+                    [&](const RecentBook& existing) { return existing.path == book.path; }) ||
+        RecentBooksStore::isMissing(book))
+      continue;
+    if (!index.readTitle(record, book.title) && !index.readName(record, book.title)) continue;
+    index.readAuthor(record, book.author);
+    if (index.ioFailed()) break;
+    recentBooks.push_back(std::move(book));
+  }
+}
+
+void HomeActivity::resolveGridCoverPaths() {
+  for (auto& book : recentBooks) {
+    if (!book.coverBmpPath.empty()) continue;
+    // Constructors only derive cache paths; no metadata parsing or image generation.
+    // Keep these large objects off the task stack and release each before the next book.
+    if (FsHelpers::hasReflowableBookExtension(book.path)) {
+      auto epub = makeUniqueNoThrow<Epub>(book.path, "/.crosspoint");
+      if (!epub) {
+        LOG_ERR("HOME", "OOM: EPUB thumbnail path");
+        continue;
+      }
+      book.coverBmpPath = epub->getThumbBmpPath();
+    } else if (FsHelpers::hasXtcExtension(book.path)) {
+      auto xtc = makeUniqueNoThrow<Xtc>(book.path, "/.crosspoint");
+      if (!xtc) {
+        LOG_ERR("HOME", "OOM: XTC thumbnail path");
+        continue;
+      }
+      book.coverBmpPath = xtc->getThumbBmpPath();
+    }
+  }
+}
+
+void HomeActivity::loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect) {
+  if (!book.coverBmpPath.empty() && Storage.exists(UITheme::getCoverThumbPath(book.coverBmpPath, height).c_str()))
+    return;
+  // Only one parser lives at a time; EPUB/XTC objects exceed the stack budget.
+  if (FsHelpers::hasReflowableBookExtension(book.path)) {
+    auto epub = makeUniqueNoThrow<Epub>(book.path, "/.crosspoint");
+    if (!epub) {
+      LOG_ERR("HOME", "OOM: cover EPUB");
+      return;
+    }
+    book.coverBmpPath = epub->getThumbBmpPath();
+    if (Storage.exists(epub->getThumbBmpPath(height).c_str())) return;
+    if (!showingLoading) {
+      showingLoading = true;
+      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+      GUI.fillPopupProgress(renderer, popupRect, 0);
+    }
+    if (epub->generateThumbBmpFromSource(height)) {
+      return;
+    }
+  } else if (FsHelpers::hasXtcExtension(book.path)) {
+    auto xtc = makeUniqueNoThrow<Xtc>(book.path, "/.crosspoint");
+    if (!xtc) {
+      LOG_ERR("HOME", "OOM: cover XTC");
+      return;
+    }
+    book.coverBmpPath = xtc->getThumbBmpPath();
+    if (Storage.exists(xtc->getThumbBmpPath(height).c_str())) return;
+    if (!showingLoading) {
+      showingLoading = true;
+      popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+      GUI.fillPopupProgress(renderer, popupRect, 0);
+    }
+    if (xtc->load() && xtc->generateThumbBmp(height)) {
+      return;
+    }
+  }
+  book.coverBmpPath.clear();
+}
+
 void HomeActivity::loadRecentCovers(int coverHeight) {
   recentsLoading = true;
   bool showingLoading = false;
-  // Tracks which book indices had a thumbnail generated this pass.
-  // Sized to LyraCarousel's max (5) since recentBooks is bounded by the active
-  // theme's homeRecentBooksCount and LyraCarousel is the maximum across themes.
-  static_assert(LyraCarouselMetrics::values.homeRecentBooksCount == 5,
-                "bookUpdated array sized to LyraCarousel max; if this metric "
-                "changes or another theme exceeds it, resize the array.");
-  bool bookUpdated[LyraCarouselMetrics::values.homeRecentBooksCount] = {};
+  // Tracks which book indices had a carousel thumbnail generated this pass. Only the carousel
+  // branch writes it, and recentBooks holds at most the active theme's homeRecentBooksCount.
+  constexpr int kCarouselBooks = LyraCarouselMetrics::values.homeRecentBooksCount;
+  bool bookUpdated[kCarouselBooks] = {};
   Rect popupRect;
 
   const bool isCarouselTheme =
@@ -101,108 +219,110 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
 
   int progress = 0;
   for (RecentBook& book : recentBooks) {
-    if (!book.coverBmpPath.empty()) {
-      if (isCarouselTheme) {
-        // For carousel: generate exact-size thumbnails for centre and side slots.
-        const std::string centerPath = UITheme::getCoverThumbPath(book.coverBmpPath, LyraCarouselTheme::kCenterCoverW,
-                                                                  LyraCarouselTheme::kCenterCoverH);
-        const std::string sidePath = UITheme::getCoverThumbPath(book.coverBmpPath, LyraCarouselTheme::kSideCoverW,
-                                                                LyraCarouselTheme::kSideCoverH);
-        const bool centerMissing = !Storage.exists(centerPath.c_str());
-        const bool sideMissing = !Storage.exists(sidePath.c_str());
+    // The cover grid shares one slot size; generating at any other height
+    // would rescale the dithered thumb at draw time and alias badly.
+    const int thumbHeight = coverGridUi ? coverGridUi->thumbHeightFor() : coverHeight;
+    if (coverGridUi) {
+      loadGridCover(book, thumbHeight, showingLoading, popupRect);
+      ++progress;
+      if (showingLoading) GUI.fillPopupProgress(renderer, popupRect, progress * 100 / recentBooks.size());
+      continue;
+    }
+    if (!book.coverBmpPath.empty() && isCarouselTheme) {
+      // Carousel: exact-size thumbnails for the centre and side slots.
+      const std::string centerPath = UITheme::getCoverThumbPath(book.coverBmpPath, LyraCarouselTheme::kCenterCoverW,
+                                                                LyraCarouselTheme::kCenterCoverH);
+      const std::string sidePath =
+          UITheme::getCoverThumbPath(book.coverBmpPath, LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH);
+      const bool centerMissing = !Storage.exists(centerPath.c_str());
+      const bool sideMissing = !Storage.exists(sidePath.c_str());
 
-        if (centerMissing || sideMissing) {
-          if (FsHelpers::hasEpubExtension(book.path)) {
-            Epub epub(book.path, "/.crosspoint");
-            // Skip loading css since we only need metadata here
-            epub.load(false, true);
-            if (!showingLoading) {
-              showingLoading = true;
-              popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-            }
-            GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-            bool success = true;
-            if (centerMissing)
-              success =
-                  epub.generateThumbBmp(LyraCarouselTheme::kCenterCoverW, LyraCarouselTheme::kCenterCoverH) && success;
-            if (sideMissing)
-              success =
-                  epub.generateThumbBmp(LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH) && success;
-            if (!success) {
-              RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
-              book.coverBmpPath = "";
-            } else {
-              bookUpdated[progress] = true;
-            }
-            coverRendered = false;
-            requestUpdate();
-          } else if (FsHelpers::hasXtcExtension(book.path)) {
-            Xtc xtc(book.path, "/.crosspoint");
-            if (xtc.load()) {
-              if (!showingLoading) {
-                showingLoading = true;
-                popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-              }
-              GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-              bool success = true;
-              if (centerMissing)
-                success =
-                    xtc.generateThumbBmp(LyraCarouselTheme::kCenterCoverW, LyraCarouselTheme::kCenterCoverH) && success;
-              if (sideMissing)
-                success =
-                    xtc.generateThumbBmp(LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH) && success;
-              if (!success) {
-                RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
-                book.coverBmpPath = "";
-              } else {
-                bookUpdated[progress] = true;
-              }
-              coverRendered = false;
-              requestUpdate();
-            }
+      if (centerMissing || sideMissing) {
+        // Runs `generate(w, h)` for whichever of the two slot sizes is missing.
+        auto generateMissing = [&](auto&& generate) {
+          bool ok = true;
+          if (centerMissing) ok = generate(LyraCarouselTheme::kCenterCoverW, LyraCarouselTheme::kCenterCoverH) && ok;
+          if (sideMissing) ok = generate(LyraCarouselTheme::kSideCoverW, LyraCarouselTheme::kSideCoverH) && ok;
+          return ok;
+        };
+        auto beginPopup = [&]() {
+          if (!showingLoading) {
+            showingLoading = true;
+            popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+          }
+          GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
+        };
+        auto finishBook = [&](bool success) {
+          if (!success) {
+            RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
+            book.coverBmpPath = "";
+          } else if (progress < kCarouselBooks) {
+            bookUpdated[progress] = true;
+          }
+          coverRendered = false;
+          requestUpdate();
+        };
+
+        if (FsHelpers::hasReflowableBookExtension(book.path)) {
+          Epub epub(book.path, "/.crosspoint");
+          // Skip loading css since we only need metadata here
+          const bool cacheLoaded = epub.load(false, true);
+          beginPopup();
+          // Without a book cache (e.g. after "Delete Book Cache") read the cover location
+          // straight from the EPUB.
+          finishBook(generateMissing([&](int w, int h) {
+            return cacheLoaded ? epub.generateThumbBmp(w, h) : epub.generateThumbBmpFromSource(w, h);
+          }));
+        } else if (FsHelpers::hasXtcExtension(book.path)) {
+          Xtc xtc(book.path, "/.crosspoint");
+          if (xtc.load()) {
+            beginPopup();
+            finishBook(generateMissing([&](int w, int h) { return xtc.generateThumbBmp(w, h); }));
           }
         }
-      } else {
-        // Non-carousel: generate height-keyed thumbnail
-        std::string coverPath = UITheme::getCoverThumbPath(book.coverBmpPath, coverHeight);
-        if (!Storage.exists(coverPath.c_str())) {
-          // If epub, try to load the metadata for title/author and cover
-          if (FsHelpers::hasEpubExtension(book.path)) {
-            Epub epub(book.path, "/.crosspoint");
-            // Skip loading css since we only need metadata here
-            epub.load(false, true);
+      }
+    } else if (!book.coverBmpPath.empty()) {
+      std::string coverPath = UITheme::getCoverThumbPath(book.coverBmpPath, thumbHeight);
+      if (!Storage.exists(coverPath.c_str())) {
+        // If epub/txt/md, try to load the metadata for title/author and cover
+        if (FsHelpers::hasReflowableBookExtension(book.path)) {
+          Epub epub(book.path, "/.crosspoint");
+          // Skip loading css since we only need metadata here
+          const bool cacheLoaded = epub.load(false, true);
 
+          // Try to generate thumbnail image for Continue Reading card
+          if (!showingLoading) {
+            showingLoading = true;
+            popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
+          }
+          GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
+          // Without a book cache (e.g. after "Delete Book Cache") there is no cached metadata,
+          // so read the cover location straight from the EPUB.
+          bool success =
+              cacheLoaded ? epub.generateThumbBmp(thumbHeight) : epub.generateThumbBmpFromSource(thumbHeight);
+          if (!success) {
+            RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
+            book.coverBmpPath = "";
+          }
+          coverRendered = false;
+          requestUpdate();
+        } else if (FsHelpers::hasXtcExtension(book.path)) {
+          // Handle XTC file
+          Xtc xtc(book.path, "/.crosspoint");
+          if (xtc.load()) {
             // Try to generate thumbnail image for Continue Reading card
             if (!showingLoading) {
               showingLoading = true;
               popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
             }
             GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-            bool success = epub.generateThumbBmp(coverHeight);
+            bool success = xtc.generateThumbBmp(thumbHeight);
             if (!success) {
               RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
               book.coverBmpPath = "";
             }
             coverRendered = false;
             requestUpdate();
-          } else if (FsHelpers::hasXtcExtension(book.path)) {
-            // Handle XTC file
-            Xtc xtc(book.path, "/.crosspoint");
-            if (xtc.load()) {
-              // Try to generate thumbnail image for Continue Reading card
-              if (!showingLoading) {
-                showingLoading = true;
-                popupRect = GUI.drawPopup(renderer, tr(STR_LOADING_POPUP));
-              }
-              GUI.fillPopupProgress(renderer, popupRect, 10 + progress * (90 / recentBooks.size()));
-              bool success = xtc.generateThumbBmp(coverHeight);
-              if (!success) {
-                RECENT_BOOKS.updateBook(book.path, book.title, book.author, "");
-                book.coverBmpPath = "";
-              }
-              coverRendered = false;
-              requestUpdate();
-            }
           }
         }
       }
@@ -216,7 +336,7 @@ void HomeActivity::loadRecentCovers(int coverHeight) {
   // Re-render only the affected carousel slots rather than rebuilding the cache.
   if (isCarouselTheme) {
     bool anyUpdated = false;
-    for (int i = 0; i < static_cast<int>(recentBooks.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(recentBooks.size()) && i < kCarouselBooks; ++i) {
       if (!bookUpdated[i]) continue;
       anyUpdated = true;
       if (carouselFramesReady) {
@@ -240,13 +360,33 @@ void HomeActivity::onEnter() {
   Activity::onEnter();
 
   hasOpdsServers = OPDS_STORE.hasServers();
+  // Plugin System is the global opt-in. Once enabled, expose the Plugins entry
+  // even when no SD plugins are installed yet so Plugin Hub can be installed
+  // from inside the Plugins screen (or users can sideload plugins manually).
+  hasPlugins = SETTINGS.pluginsEnabled != 0;
   carouselFramesReady = false;
 
   const auto& metrics = UITheme::getInstance().getMetrics();
-  loadRecentBooks(metrics.homeRecentBooksCount);
+  if (UITheme::getInstance().hasCoverGridHome()) {
+    // Screen-lifetime interaction tables and component properties exceed the stack budget.
+    coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
+    if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
+  }
+  loadRecentBooks(coverGridUi ? CoverGridHomeUi::MAX_BOOKS : metrics.homeRecentBooksCount);
+  hasContinueReading = !recentBooks.empty();
+  if (coverGridUi) {
+    fillCoverGridFromLibrary();
+    resolveGridCoverPaths();
+    const HomeMenuItem slot = slotItem();
+    coverGridUi->begin(recentBooks,
+                       slot == HomeMenuItem::PLUGINS        ? CoverGridHomeUi::SlotTab::PLUGINS
+                       : slot == HomeMenuItem::OPDS_BROWSER ? CoverGridHomeUi::SlotTab::OPDS
+                                                            : CoverGridHomeUi::SlotTab::NONE,
+                       hasContinueReading);
+  }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, hasOpdsServers);
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, slotItem());
 
   // Pre-render carousel frames before the first display update so the fast
   // path is active from render #1. Cache hit = instant. Cache miss = SD reads
@@ -261,6 +401,8 @@ void HomeActivity::onEnter() {
 
 void HomeActivity::onExit() {
   Activity::onExit();
+
+  coverGridUi.reset();
 
   // Free the stored cover buffer if any
   freeCoverBuffer();
@@ -281,6 +423,7 @@ bool HomeActivity::storeCoverBuffer() {
     return false;
   }
   coverBufferSize = needed;
+  coverBufferInverted = display.isInverted();
   if (!renderer.copyRegionToBuffer(coverRectX, coverRectY, coverRectW, coverRectH, coverBuffer, coverBufferSize)) {
     free(coverBuffer);
     coverBuffer = nullptr;
@@ -323,7 +466,7 @@ void HomeActivity::preRenderCarouselFrames() {
   }
 
   // Cache hit: same books in same order — reuse without any SD reads
-  if (newKey == gCacheKey && gCachedFrameCount > 0) {
+  if (newKey == gCacheKey && gCachedFrameCount > 0 && gCachedFramesInverted == display.isInverted()) {
     for (int i = 0; i < gCachedFrameCount; ++i) carouselFrames[i] = gCachedFrames[i];
     carouselFramesReady = true;
     coverRendered = false;
@@ -359,6 +502,7 @@ void HomeActivity::preRenderCarouselFrames() {
 
   gCachedFrameCount = frameCount;
   gCacheKey = newKey;
+  gCachedFramesInverted = display.isInverted();
   carouselFramesReady = true;
   coverRendered = false;
   coverBufferStored = false;
@@ -377,7 +521,7 @@ void HomeActivity::renderCarouselFrame(int bookIdx, int slotIdx) {
   // index set below and draws no selection border (baked frames stay neutral).
   LyraCarouselTheme::setPreRenderIndex(bookIdx);
   renderer.clearScreen();
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding}, nullptr);
+  // The header (clock, battery) is drawn live in render(); baking it would freeze both.
   GUI.drawRecentBookCover(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
                           recentBooks, bookCount, dummy1, dummy2, dummy3, []() { return true; });
 
@@ -425,44 +569,84 @@ void HomeActivity::updateSlidingWindowCache(int centerIdx, int bookCount) {
 }
 
 void HomeActivity::loop() {
+  const int menuCount = getMenuItemCount();
+  const auto& metrics = UITheme::getInstance().getMetrics();
+
+  auto activateSelection = [this] {
+    if (selectorIndex < recentBooks.size()) {
+      onRecentBookSelected(recentBooks[selectorIndex].path);
+      return;
+    }
+    const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
+    switch (indexToMenuItem(menuIndex, slotItem())) {
+      case HomeMenuItem::FILE_BROWSER:
+        onFileBrowserOpen();
+        break;
+      case HomeMenuItem::LIBRARY:
+        onLibraryOpen();
+        break;
+      case HomeMenuItem::PLUGINS:
+        onPluginsOpen();
+        break;
+      case HomeMenuItem::OPDS_BROWSER:
+        onOpdsBrowserOpen();
+        break;
+      case HomeMenuItem::FILE_TRANSFER:
+        onFileTransferOpen();
+        break;
+      case HomeMenuItem::SETTINGS_MENU:
+        onSettingsOpen();
+        break;
+      default:
+        break;
+    }
+  };
+
   const bool isCarousel =
       static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
 
+  // Carousel: two-axis navigation. Left/Right cycles within the focused row; Up/Down (buttons or
+  // swipes) toggles between the carousel row and the icon menu row.
+  const int carouselBookCount = static_cast<int>(recentBooks.size());
+  const auto toggleCarouselRow = [this, carouselBookCount] {
+    if (carouselBookCount == 0) return;
+    if (selectorIndex < carouselBookCount) {
+      lastCarouselBookIndex = selectorIndex;
+      selectorIndex = carouselBookCount;
+    } else {
+      selectorIndex = lastCarouselBookIndex;
+    }
+    requestUpdate();
+  };
   if (isCarousel) {
-    // Two-axis navigation: Left/Right cycles within the focused row,
-    // Up/Down toggles between the carousel row and the icon menu row.
-    const int bookCount = static_cast<int>(recentBooks.size());
-    const int menuItemCount = 4 + (hasOpdsServers ? 1 : 0);
-    const bool inCarouselRow = (selectorIndex < bookCount);
-    const int menuIdx = inCarouselRow ? 0 : (selectorIndex - bookCount);
-
+    const int menuItemCount = menuCount - carouselBookCount;
+    const bool inCarouselRow = selectorIndex < carouselBookCount;
+    const int menuIdx = inCarouselRow ? 0 : selectorIndex - carouselBookCount;
     if (mappedInput.wasPressed(MappedInputManager::Button::Right)) {
-      if (inCarouselRow && bookCount > 0)
-        selectorIndex = (selectorIndex + 1) % bookCount;
-      else if (!inCarouselRow)
-        selectorIndex = bookCount + (menuIdx + 1) % menuItemCount;
+      if (inCarouselRow && carouselBookCount > 0) {
+        selectorIndex = (selectorIndex + 1) % carouselBookCount;
+      } else if (!inCarouselRow) {
+        selectorIndex = carouselBookCount + (menuIdx + 1) % menuItemCount;
+      }
       requestUpdate();
     }
     if (mappedInput.wasPressed(MappedInputManager::Button::Left)) {
-      if (inCarouselRow && bookCount > 0)
-        selectorIndex = (selectorIndex + bookCount - 1) % bookCount;
-      else if (!inCarouselRow)
-        selectorIndex = bookCount + (menuIdx + menuItemCount - 1) % menuItemCount;
+      if (inCarouselRow && carouselBookCount > 0) {
+        selectorIndex = (selectorIndex + carouselBookCount - 1) % carouselBookCount;
+      } else if (!inCarouselRow) {
+        selectorIndex = carouselBookCount + (menuIdx + menuItemCount - 1) % menuItemCount;
+      }
       requestUpdate();
     }
     if (mappedInput.wasPressed(MappedInputManager::Button::Down) ||
         mappedInput.wasPressed(MappedInputManager::Button::Up)) {
-      if (inCarouselRow && bookCount > 0) {
-        lastCarouselBookIndex = selectorIndex;
-        selectorIndex = bookCount;
-      } else if (!inCarouselRow && bookCount > 0) {
-        selectorIndex = lastCarouselBookIndex;
-      }
-      requestUpdate();
+      toggleCarouselRow();
     }
-  } else {
-    const int menuCount = getMenuItemCount();
+  }
 
+  // Cover grid home splits navigation by button group (see below); the flat
+  // next/previous cycle is for the classic list home only.
+  if (!coverGridUi && !isCarousel) {
     buttonNavigator.onNext([this, menuCount] {
       selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
       requestUpdate();
@@ -474,31 +658,132 @@ void HomeActivity::loop() {
     });
   }
 
-  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    if (selectorIndex < recentBooks.size()) {
-      onSelectBook(recentBooks[selectorIndex].path);
-    } else {
-      const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-      switch (indexToMenuItem(menuIndex, hasOpdsServers)) {
-        case HomeMenuItem::FILE_BROWSER:
-          onFileBrowserOpen();
-          break;
-        case HomeMenuItem::RECENTS:
-          onRecentsOpen();
-          break;
-        case HomeMenuItem::OPDS_BROWSER:
-          onOpdsBrowserOpen();
-          break;
-        case HomeMenuItem::FILE_TRANSFER:
-          onFileTransferOpen();
-          break;
-        case HomeMenuItem::SETTINGS_MENU:
-          onSettingsOpen();
-          break;
-        default:
-          break;
-      }
+  const auto swipe = mappedInput.wasSwipe();
+  if (isCarousel && (swipe == MappedInputManager::SwipeDir::Up || swipe == MappedInputManager::SwipeDir::Down)) {
+    toggleCarouselRow();
+    return;
+  }
+  if (swipe == MappedInputManager::SwipeDir::Up) {
+    selectorIndex = ButtonNavigator::nextIndex(selectorIndex, menuCount);
+    requestUpdate();
+    return;
+  }
+  if (swipe == MappedInputManager::SwipeDir::Down) {
+    selectorIndex = ButtonNavigator::previousIndex(selectorIndex, menuCount);
+    requestUpdate();
+    return;
+  }
+
+  // Back is otherwise unused on the home menu: open the most recently read
+  // book directly (recentBooks is most-recent-first and already pruned of
+  // files missing from the SD card).
+  if (mappedInput.wasReleased(MappedInputManager::Button::Back) && hasContinueReading && !recentBooks.empty()) {
+    onRecentBookSelected(recentBooks[0].path);
+    return;
+  }
+
+  if (coverGridUi) {
+    const int touched = coverGridUi->selectedAction(mappedInput);
+    if (touched >= 0 && touched < menuCount) {
+      selectorIndex = touched;
+      activateSelection();
+      return;
     }
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      activateSelection();
+      return;
+    }
+    // Side page buttons walk the covers, front Left/Right walk the tabs
+    // (selectorIndex is flat: books first, then the tab items). A press while
+    // selection sits in the other band jumps into this band first.
+    const int bookCount = static_cast<int>(recentBooks.size());
+    const auto cycleBand = [this](const int base, const int count, const int dir) {
+      if (count <= 0) return;
+      int idx = selectorIndex - base;
+      if (idx < 0 || idx >= count) {
+        idx = dir > 0 ? 0 : count - 1;
+      } else {
+        idx = (idx + count + dir) % count;
+      }
+      selectorIndex = base + idx;
+      requestUpdate();
+    };
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Up},
+                                         [&cycleBand, bookCount] { cycleBand(0, bookCount, -1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Down},
+                                         [&cycleBand, bookCount] { cycleBand(0, bookCount, +1); });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Left}, [this, &cycleBand] {
+      const int bookCount = static_cast<int>(recentBooks.size());
+      cycleBand(bookCount, getMenuItemCount() - bookCount, -1);
+    });
+    buttonNavigator.onPressAndContinuous({MappedInputManager::Button::Right}, [this, &cycleBand] {
+      const int bookCount = static_cast<int>(recentBooks.size());
+      cycleBand(bookCount, getMenuItemCount() - bookCount, +1);
+    });
+    return;
+  }
+
+  if (isCarousel) {
+    // The carousel's centre/side slots and tile row don't match the column/row hit grids below.
+    if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+      activateSelection();
+    }
+    return;
+  }
+
+  // Match the rendered cover grid, which lays tiles inside getContentArea()
+  // (origin content.x + contentSidePadding, span content.width). Using
+  // screen-relative getScreenWidth()/contentSidePadding here offset the touch
+  // targets from the drawn covers by content.x on bezel-inset panels (EEGO A4).
+  const Rect content = UITheme::getInstance().getContentArea(renderer);
+  const int coverColumnCount = std::max(1, metrics.homeRecentBooksCount);
+  const int recentCount = std::min(static_cast<int>(recentBooks.size()), coverColumnCount);
+  const int coverColumnWidth = (content.width - 2 * metrics.contentSidePadding) / coverColumnCount;
+  int touchedBook = -1;
+  const auto coverTouch = mappedInput.colTouch(touchedBook, content.x + metrics.contentSidePadding, coverColumnWidth,
+                                               recentCount, metrics.homeTopPadding,
+                                               metrics.homeTopPadding + metrics.homeCoverTileHeight, coverColumnWidth);
+  if (coverTouch != MappedInputManager::RowTouch::None) {
+    if (coverTouch == MappedInputManager::RowTouch::Down) {
+      if (selectorIndex != touchedBook) {
+        selectorIndex = touchedBook;
+        requestUpdate();
+      }
+    } else {
+      selectorIndex = touchedBook;
+      haptic_feedback::touchAction();
+      activateSelection();
+    }
+    return;
+  }
+
+  const int menuTop = metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset;
+  const int renderedMenuCount =
+      menuCount - (metrics.homeContinueReadingInMenu ? 0 : static_cast<int>(recentBooks.size()));
+  int menuRow = -1;
+  // Row height from the theme, not the metrics table: RoundedRaff draws
+  // font-derived rows and the touch grid must match the visuals exactly.
+  const int menuRowHeight = GUI.getMenuRowHeight(renderer);
+  const auto menuTouch = mappedInput.rowTouch(menuRow, menuTop, menuRowHeight + metrics.menuSpacing, renderedMenuCount,
+                                              0, INT32_MAX, menuRowHeight);
+  if (menuTouch != MappedInputManager::RowTouch::None) {
+    const int touchedIndex =
+        metrics.homeContinueReadingInMenu ? menuRow : menuRow + static_cast<int>(recentBooks.size());
+    if (menuTouch == MappedInputManager::RowTouch::Down) {
+      if (selectorIndex != touchedIndex) {
+        selectorIndex = touchedIndex;
+        requestUpdate();
+      }
+    } else {
+      selectorIndex = touchedIndex;
+      haptic_feedback::touchAction();
+      activateSelection();
+    }
+    return;
+  }
+
+  if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
+    activateSelection();
   }
 }
 
@@ -506,9 +791,18 @@ void HomeActivity::render(RenderLock&&) {
   const auto& metrics = UITheme::getInstance().getMetrics();
   const auto pageWidth = renderer.getScreenWidth();
   const auto pageHeight = renderer.getScreenHeight();
+  // Content columns clear the bezel insets on rounded panels. The header
+  // self-insets in drawHeader, so only the cover/menu need it here.
+  const Rect content = UITheme::getInstance().getContentArea(renderer);
 
   // Carousel fast path: pre-rendered frame ready — memcpy + border overlay
   // instead of re-reading covers from SD on every selection change.
+  if (carouselFramesReady && gCachedFramesInverted != display.isInverted()) {
+    // Output polarity flipped since the frames were baked: rebuild them.
+    invalidateCarouselCache();
+    freeCarouselFrames();
+    preRenderCarouselFrames();
+  }
   if (carouselFramesReady) {
     uint8_t* frameBuffer = renderer.getFrameBuffer();
     const int bookCount = static_cast<int>(recentBooks.size());
@@ -519,16 +813,18 @@ void HomeActivity::render(RenderLock&&) {
     if (frameBuffer && slotIdx >= 0 && carouselFrames[slotIdx]) {
       memcpy(frameBuffer, carouselFrames[slotIdx], renderer.getBufferSize());
 
+      // Home is the stack root: no back button. Drawn live so the clock and battery stay current.
+      GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding - metrics.topPadding},
+                     nullptr, nullptr, false);
+
       GUI.drawCarouselBorder(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
                              inCarouselRow);
 
-      std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                            tr(STR_SETTINGS_TITLE)};
-      std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
-      if (hasOpdsServers) {
-        menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
-        menuIcons.insert(menuIcons.begin() + 2, Library);
-      }
+      std::vector<const char*> menuItems;
+      std::vector<UIIcon> menuIcons;
+      menuItems.reserve(5);
+      menuIcons.reserve(5);
+      appendHomeMenu(menuItems, menuIcons);
 
       GUI.drawButtonMenu(
           renderer,
@@ -539,7 +835,8 @@ void HomeActivity::render(RenderLock&&) {
           [&menuItems](int index) { return std::string(menuItems[index]); },
           [&menuIcons](int index) { return menuIcons[index]; });
 
-      const auto labels = mappedInput.mapLabels("", tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+      const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT),
+                                                tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
       GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
       renderer.displayBuffer();
@@ -559,32 +856,76 @@ void HomeActivity::render(RenderLock&&) {
   }
 
   renderer.clearScreen();
-  bool bufferRestored = coverBufferStored && restoreCoverBuffer();
+  if (coverGridUi) {
+    const auto drawGrid = [&] {
+      renderer.clearScreen();
+      coverGridUi->setSelection(selectorIndex);
+      UITheme::getInstance().drawCoverGridHome(*coverGridUi);
+      // Front Left/Right walk the tabs, so their hints read Left/Right; the
+      // side page buttons (unhinted) walk the covers.
+      const auto labels = mappedInput.mapLabels(hasContinueReading ? tr(STR_RESUME) : "", tr(STR_SELECT),
+                                                tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT));
+      GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
+    };
+    drawGrid();
+    // Slot heights are recorded during the draw above; a change (first layout
+    // pass, orientation switch) means the paths must point at those sizes and
+    // any missing thumbs must be generated. Resolve the covers before the
+    // panel is touched and redraw into the framebuffer, so Home paints once
+    // instead of three e-ink refreshes (placeholder, placeholder, covers).
+    if (coverGridUi->takeThumbHeightChanged()) {
+      coverGridUi->refreshCoverPaths();
+      recentsLoaded = false;
+    }
+    if (!recentsLoaded && !recentsLoading) {
+      loadRecentCovers(CoverGridHomeUi::THUMB_HEIGHT);
+      coverGridUi->refreshCoverPaths();
+      drawGrid();
+      if (coverGridUi->takeThumbHeightChanged()) {
+        coverGridUi->refreshCoverPaths();
+        recentsLoaded = false;
+        requestUpdate();
+      }
+    }
+    renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH
+                                                                   : HalDisplay::FAST_REFRESH);
+    firstRenderDone = true;
+    return;
+  }
+  // A cover snapshot from the other output polarity holds the other byte form (night mode keeps images pre-inverted so
+  // they stay positive): pasting it back after a theme switch showed the cover as a negative. Redraw it instead.
+  if (coverBufferStored && coverBufferInverted != display.isInverted()) {
+    freeCoverBuffer();
+    coverRendered = false;
+  }
+  bool bufferRestored = coverRendered && coverBufferStored && restoreCoverBuffer();
 
-  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding},
-                 metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr);
+  // Band spans topPadding..homeTopPadding: the cover tile starts at the fixed
+  // homeTopPadding, so the height must shrink by topPadding or the band (and a
+  // centered title, e.g. RoundedRaff's book title) sinks into the tile.
+  // Home is the stack root: no back button in its header.
+  GUI.drawHeader(renderer, Rect{0, metrics.topPadding, pageWidth, metrics.homeTopPadding - metrics.topPadding},
+                 metrics.homeContinueReadingInMenu && !recentBooks.empty() ? recentBooks[0].title.c_str() : nullptr,
+                 nullptr, false);
 
   // Record the tile rect so storeCoverBuffer (called from the theme) knows
   // which sub-region of the framebuffer to snapshot. ~16 KB in Portrait
   // instead of the 48 KB full framebuffer the previous bind captured.
-  coverRectX = 0;
+  coverRectX = content.x;
   coverRectY = metrics.homeTopPadding;
-  coverRectW = pageWidth;
+  coverRectW = content.width;
   coverRectH = metrics.homeCoverTileHeight;
 
-  GUI.drawRecentBookCover(renderer, Rect{0, metrics.homeTopPadding, pageWidth, metrics.homeCoverTileHeight},
+  GUI.drawRecentBookCover(renderer, Rect{content.x, metrics.homeTopPadding, content.width, metrics.homeCoverTileHeight},
                           recentBooks, selectorIndex, coverRendered, coverBufferStored, bufferRestored,
                           std::bind(&HomeActivity::storeCoverBuffer, this));
 
   // Build menu items dynamically
-  std::vector<const char*> menuItems = {tr(STR_BROWSE_FILES), tr(STR_MENU_RECENT_BOOKS), tr(STR_FILE_TRANSFER),
-                                        tr(STR_SETTINGS_TITLE)};
-  std::vector<UIIcon> menuIcons = {Folder, Recent, Transfer, Settings};
-
-  if (hasOpdsServers) {
-    menuItems.insert(menuItems.begin() + 2, tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, Library);
-  }
+  std::vector<const char*> menuItems;
+  std::vector<UIIcon> menuIcons;
+  menuItems.reserve(6);
+  menuIcons.reserve(6);
+  appendHomeMenu(menuItems, menuIcons);
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
     // Insert Continue Reading at the top if enabled in theme
@@ -594,7 +935,7 @@ void HomeActivity::render(RenderLock&&) {
 
   GUI.drawButtonMenu(
       renderer,
-      Rect{0, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, pageWidth,
+      Rect{content.x, metrics.homeTopPadding + metrics.homeCoverTileHeight + metrics.homeMenuTopOffset, content.width,
            pageHeight - (metrics.headerHeight + metrics.homeTopPadding + metrics.verticalSpacing +
                          metrics.homeMenuTopOffset + metrics.buttonHintsHeight)},
       static_cast<int>(menuItems.size()),
@@ -602,25 +943,25 @@ void HomeActivity::render(RenderLock&&) {
       [&menuItems](int index) { return std::string(menuItems[index]); },
       [&menuIcons](int index) { return menuIcons[index]; });
 
-  const bool isCarouselTheme =
+  const bool carouselHints =
       static_cast<CrossPointSettings::UI_THEME>(SETTINGS.uiTheme) == CrossPointSettings::UI_THEME::LYRA_CAROUSEL;
-  const auto labels = isCarouselTheme ? mappedInput.mapLabels("", tr(STR_SELECT), tr(STR_DIR_LEFT), tr(STR_DIR_RIGHT))
-                                      : mappedInput.mapLabels("", tr(STR_SELECT), tr(STR_DIR_UP), tr(STR_DIR_DOWN));
+  const auto labels = mappedInput.mapLabels(recentBooks.empty() ? "" : tr(STR_RESUME), tr(STR_SELECT),
+                                            carouselHints ? tr(STR_DIR_LEFT) : tr(STR_DIR_UP),
+                                            carouselHints ? tr(STR_DIR_RIGHT) : tr(STR_DIR_DOWN));
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
 
-  renderer.displayBuffer();
+  renderer.displayBuffer(cleanInitialRefresh && !firstRenderDone ? HalDisplay::HALF_REFRESH : HalDisplay::FAST_REFRESH);
 
-  if (!firstRenderDone) {
-    firstRenderDone = true;
-    requestUpdate();
-  } else if (!recentsLoaded && !recentsLoading) {
+  firstRenderDone = true;
+  if (!recentsLoaded && !recentsLoading) {
     recentsLoading = true;
-    loadRecentCovers(metrics.homeCoverHeight);
+    const int themeThumbHeight = GUI.homeCoverThumbHeight(renderer);
+    loadRecentCovers(themeThumbHeight > 0 ? themeThumbHeight : metrics.homeCoverHeight);
   }
 }
 
-void HomeActivity::onSelectBook(const std::string& path) {
-  // Release the frame cache (up to 3 × 48 KB) before the reader starts allocating.
+void HomeActivity::onRecentBookSelected(const std::string& path) {
+  // Release the frame cache (up to 3 x 48 KB) before the reader starts allocating.
   invalidateCarouselCache();
   freeCarouselFrames();
   activityManager.goToReader(path);
@@ -628,10 +969,12 @@ void HomeActivity::onSelectBook(const std::string& path) {
 
 void HomeActivity::onFileBrowserOpen() { activityManager.goToFileBrowser(); }
 
-void HomeActivity::onRecentsOpen() { activityManager.goToRecentBooks(); }
+void HomeActivity::onLibraryOpen() { activityManager.goToLibrary(); }
 
 void HomeActivity::onSettingsOpen() { activityManager.goToSettings(); }
 
 void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
+
+void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(); }

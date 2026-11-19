@@ -10,15 +10,14 @@ struct RecentBook {
   std::string title;
   std::string author;
   std::string coverBmpPath;
-
-  bool operator==(const RecentBook& other) const { return path == other.path; }
 };
 
 class RecentBooksStore : public PersistableStore<RecentBooksStore> {
+ public:
+  static constexpr int MAX_RECENT_BOOKS = 10;
+
  private:
   std::vector<RecentBook> recentBooks;
-
-  static constexpr int MAX_RECENT_BOOKS = 10;
 
   RecentBooksStore() = default;
   ~RecentBooksStore() = default;
@@ -60,8 +59,6 @@ class RecentBooksStore : public PersistableStore<RecentBooksStore> {
 
   // Get the count of recent books
   int getCount() const { return static_cast<int>(recentBooks.size()); }
-
-  RecentBook getDataFromBook(std::string path) const;
 };
 
 // Helper macro to access recent books store

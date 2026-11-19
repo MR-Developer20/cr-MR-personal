@@ -4,7 +4,7 @@
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
-#include <MinizConfig.h>
+#include <Print.h>
 
 #include <cctype>
 #include <cstring>
@@ -18,22 +18,16 @@ constexpr size_t MAX_LINE_LEN = 8192;                // pathologically long line
 constexpr int MAX_NEST_DEPTH = 4;                    // blockquote and list nesting cap (plan: "clamp deeper nesting")
 constexpr size_t MAX_IMAGE_BYTES = 2 * 1024 * 1024;  // skip (fall back to alt text) above this
 
-// Accumulates output through a HalFile while chaining a running CRC-32 and byte count, so
-// the caller has both without a second read pass over the generated file.
+// Forwards output to the caller's Print and remembers the first short write.
 struct Writer {
-  HalFile& out;
-  uint32_t crc = MZ_CRC32_INIT;
-  uint32_t size = 0;
+  Print& out;
   bool ok = true;
 
   void write(const char* data, size_t len) {
     if (!ok || len == 0) return;
     if (out.write(reinterpret_cast<const uint8_t*>(data), len) != len) {
       ok = false;
-      return;
     }
-    crc = mz_crc32(crc, reinterpret_cast<const uint8_t*>(data), len);
-    size += static_cast<uint32_t>(len);
   }
   void write(std::string_view s) { write(s.data(), s.size()); }
 
@@ -433,10 +427,51 @@ bool parseImageOnlyLine(std::string_view line, std::string_view* alt, std::strin
   return true;
 }
 
+// "1.5em" per nesting level (1..MAX_NEST_DEPTH). Returns a view of a static string.
+std::string_view indentEm(int depth) {
+  switch (depth) {
+    case 1:
+      return "1.5em";
+    case 2:
+      return "3em";
+    case 3:
+      return "4.5em";
+    default:
+      return "6em";
+  }
+}
+
+std::string_view headingStyle(int level) {
+  switch (level) {
+    case 1:
+      return "margin-top:0;margin-bottom:1em";
+    case 2:
+      return "margin-top:1.5em;margin-bottom:0.8em";
+    case 3:
+      return "margin-top:1.2em;margin-bottom:0.6em";
+    default:
+      return "margin-top:1em;margin-bottom:0.5em;text-align:left";
+  }
+}
+
+// Percent-encodes everything outside the RFC 3986 unreserved set (plus '/'), byte by byte, so the
+// EPUB layout code's URI decoding recovers the original path and the attribute stays well-formed.
+void writeUriEncoded(Writer& w, std::string_view s) {
+  static constexpr char HEX_DIGITS[] = "0123456789ABCDEF";
+  for (const char c : s) {
+    const unsigned char u = static_cast<unsigned char>(c);
+    if (isalnum(u) || c == '-' || c == '.' || c == '_' || c == '~' || c == '/') {
+      w.write(&c, 1);
+    } else {
+      const char enc[3] = {'%', HEX_DIGITS[u >> 4], HEX_DIGITS[u & 0x0F]};
+      w.write(enc, 3);
+    }
+  }
+}
+
 // Validates a Markdown image reference resolves to a local, embeddable (JPEG/PNG), size-bounded
 // file next to the source document. Rejects absolute paths, parent traversal, and remote URLs.
-bool resolveLocalImage(const std::string& mdFolder, std::string_view relSrc, std::string* resolvedSdPath,
-                       const char** ext) {
+bool resolveLocalImage(const std::string& mdFolder, std::string_view relSrc) {
   if (relSrc.empty() || relSrc[0] == '/') return false;
   if (relSrc.find("://") != std::string_view::npos) return false;
   if (relSrc.find("..") != std::string_view::npos) return false;
@@ -450,8 +485,6 @@ bool resolveLocalImage(const std::string& mdFolder, std::string_view relSrc, std
   if (!Storage.openFileForRead("MDX", candidate, f)) return false;
   if (f.size() > MAX_IMAGE_BYTES) return false;
 
-  *resolvedSdPath = candidate;
-  *ext = FsHelpers::hasPngExtension(candidate) ? ".png" : ".jpg";
   return true;
 }
 
@@ -459,17 +492,13 @@ enum class OpenKind : uint8_t { None, Paragraph, Blockquote, ListUl, ListOl, Cod
 
 }  // namespace
 
-MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, const std::string& dstPath) {
+MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, Print& out, const char* headerComment) {
   Result result;
+  result.headings.reserve(16);
 
   HalFile in;
   if (!Storage.openFileForRead("MDX", srcPath, in)) {
     LOG_ERR("MDX", "Cannot open source: %s", srcPath.c_str());
-    return result;
-  }
-  HalFile out;
-  if (!Storage.openFileForWrite("MDX", dstPath, out)) {
-    LOG_ERR("MDX", "Cannot open destination: %s", dstPath.c_str());
     return result;
   }
 
@@ -482,9 +511,13 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
   const std::string mdFolder = FsHelpers::extractFolderPath(srcPath);
   Writer w{out};
 
-  w.write(
-      "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<html "
-      "xmlns=\"http://www.w3.org/1999/xhtml\"><head><title/></head><body>\n");
+  w.write("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+  if (headerComment != nullptr) {
+    // The reader checks the first ~80 bytes of the cached copy for this tag.
+    w.write(headerComment);
+    w.write("\n");
+  }
+  w.write("<html xmlns=\"http://www.w3.org/1999/xhtml\"><head><title/></head><body>\n");
 
   OpenKind open = OpenKind::None;
   int quoteDepth = 0;
@@ -495,7 +528,6 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
   int fenceLen = 0;
   bool pendingHardBreak = false;
   int headingCounter = 0;
-  int imageCounter = 0;
 
   auto closeOpen = [&]() {
     switch (open) {
@@ -529,7 +561,7 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
       if (isFenceClose(v, fenceChar, fenceLen)) {
         open = OpenKind::None;
       } else {
-        w.write("<p class=\"code\">");
+        w.write("<p style=\"margin-left:1.5em;text-align:left;text-indent:0\">");
         w.writeEscaped(v.empty() ? std::string_view(" ") : v);
         w.write("</p>\n");
       }
@@ -565,6 +597,8 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
       w.write(&levelChar, 1);
       w.write(" id=\"");
       w.write(anchorId);
+      w.write("\" style=\"");
+      w.write(headingStyle(headingLevel));
       w.write("\">");
       if (headingLevel == 1) {
         renderInline(asciiUppercase(headingText), w);
@@ -599,7 +633,7 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
         closeOpen();
         open = OpenKind::CodeIndented;
       }
-      w.write("<p class=\"code\">");
+      w.write("<p style=\"margin-left:1.5em;text-align:left;text-indent:0\">");
       w.writeEscaped(codeContent.empty() ? std::string_view(" ") : codeContent);
       w.write("</p>\n");
       continue;
@@ -610,16 +644,13 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
 
     if (parseImageOnlyLine(v, &imgAlt, &imgSrc)) {
       closeOpen();
-      std::string resolvedSdPath;
-      const char* ext = nullptr;
-      if (resolveLocalImage(mdFolder, imgSrc, &resolvedSdPath, &ext)) {
-        std::string zipName = "OEBPS/images/img" + std::to_string(imageCounter++) + ext;
-        w.write("<p><img src=\"images/");
-        w.write(std::string_view(zipName).substr(sizeof("OEBPS/images/") - 1));
+      if (resolveLocalImage(mdFolder, imgSrc)) {
+        // The reader resolves this against the .md's folder (Txt::resolveCompanionResource).
+        w.write("<p><img src=\"");
+        writeUriEncoded(w, imgSrc);
         w.write("\" alt=\"");
         w.writeEscaped(imgAlt);
         w.write("\"/></p>\n");
-        result.images.push_back({std::move(resolvedSdPath), std::move(zipName)});
       } else {
         w.write("<p><em>[Image");
         if (!imgAlt.empty()) {
@@ -639,10 +670,9 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
           closeOpen();
           quoteDepth = newQuoteDepth;
           open = OpenKind::Blockquote;
-          w.write("<blockquote class=\"q");
-          const char depthChar = static_cast<char>('0' + quoteDepth);
-          w.write(&depthChar, 1);
-          w.write("\">");
+          w.write("<blockquote style=\"margin-left:");
+          w.write(indentEm(quoteDepth));
+          w.write(";margin-right:1em;font-style:italic\">");
         } else {
           w.write(pendingHardBreak ? "<br/>" : " ");
         }
@@ -662,20 +692,18 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
       lastListDepth = listDepth;
       listOrdinal[listDepth]++;
       const std::string_view itemText = v.substr(contentStart);
-      const char depthChar = static_cast<char>('0' + listDepth);
-
       if (ordered) {
         open = OpenKind::ListOl;
-        w.write("<div class=\"ol");
-        w.write(&depthChar, 1);
-        w.write("\">");
+        w.write("<div style=\"margin-left:");
+        w.write(indentEm(listDepth));
+        w.write(";text-align:left;text-indent:0\">");
         w.write(std::to_string(listOrdinal[listDepth]));
         w.write(". ");
       } else {
         open = OpenKind::ListUl;
-        w.write("<li class=\"ul");
-        w.write(&depthChar, 1);
-        w.write("\">");
+        w.write("<li style=\"margin-left:");
+        w.write(indentEm(listDepth));
+        w.write(";text-align:left;text-indent:0\">");
       }
       renderInline(itemText, w);
       pendingHardBreak = hardBreak;
@@ -707,7 +735,5 @@ MarkdownToXhtml::Result MarkdownToXhtml::convert(const std::string& srcPath, con
   }
 
   result.ok = true;
-  result.crc32 = w.crc;
-  result.size = w.size;
   return result;
 }

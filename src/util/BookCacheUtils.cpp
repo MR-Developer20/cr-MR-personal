@@ -4,9 +4,9 @@
 #include <FsHelpers.h>
 #include <Jwpub.h>
 #include <Logging.h>
-#include <Markdown.h>
-#include <Txt.h>
 #include <Xtc.h>
+
+#include "ClippingStore.h"
 
 bool isBookCacheDirectoryName(const char* name) {
   if (!name) {
@@ -27,23 +27,22 @@ bool isBookCacheDirectoryName(const char* name) {
 }
 
 void clearBookCache(const std::string& path) {
-  if (FsHelpers::hasEpubExtension(path)) {
+  if (FsHelpers::hasReflowableBookExtension(path)) {
     Epub(path, "/.crosspoint").clearCache();
   } else if (FsHelpers::hasXtcExtension(path)) {
     Xtc(path, "/.crosspoint").clearCache();
-  } else if (FsHelpers::hasTxtExtension(path)) {
-    Txt(path, "/.crosspoint").clearCache();
   } else if (FsHelpers::hasJwpubExtension(path)) {
-    Jwpub(path, "/.crosspoint").clearCache();
-  } else if (FsHelpers::hasMarkdownExtension(path)) {
-    // Two cache dirs: md_<hash> (the .md's own cache, holding the generated book.epub) and
-    // the wrapping Epub's own epub_<hash-of-book.epub-path> cache (book.bin/sections/*) —
-    // a sibling directory under /.crosspoint, not nested under md_<hash>. Both need clearing.
-    Markdown markdown(path, "/.crosspoint");
-    Epub(markdown.getEpubPath(), "/.crosspoint").clearCache();
-    markdown.clearCache();
+    Jwpub jwpub(path, "/.crosspoint");
+    Epub(jwpub.getContentPath(), "/.crosspoint").clearCache();
+    jwpub.clearCache();
   } else {
     return;
   }
   LOG_DBG("BookCache", "Done checking metadata cache for: %s", path.c_str());
+}
+
+bool removeBookFile(const std::string& path) {
+  if (!Storage.remove(path.c_str())) return false;
+  clearBookCache(path);
+  return ClippingStore::deleteForFilePath(path, "epub");
 }

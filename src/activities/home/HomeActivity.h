@@ -3,10 +3,12 @@
 #include <vector>
 
 #include "./FileBrowserActivity.h"
+#include "RecentBooksStore.h"
 #include "activities/Activity.h"
+#include "components/CoverGridHomeUi.h"
+#include "components/themes/BaseTheme.h"
 #include "util/ButtonNavigator.h"
 
-struct RecentBook;
 struct Rect;
 
 class HomeActivity final : public Activity {
@@ -14,6 +16,7 @@ class HomeActivity final : public Activity {
   static constexpr int kCarouselFrameCount = 3;
 
  private:
+  std::unique_ptr<CoverGridHomeUi> coverGridUi;
   ButtonNavigator buttonNavigator;
   int selectorIndex = 0;
   int lastCarouselBookIndex = 0;  // remembered position when leaving the carousel row
@@ -21,10 +24,21 @@ class HomeActivity final : public Activity {
   bool recentsLoaded = false;
   bool firstRenderDone = false;
   bool hasOpdsServers = false;
+  bool hasPlugins = false;
+  // The home "library" slot (index 2) shows Plugins while the plugin system is
+  // enabled, otherwise OPDS when a server is configured. NONE hides the slot.
+  // NetworkModeSelectionActivity lists OPDS in exactly the other cases.
+  HomeMenuItem slotItem() const {
+    if (hasPlugins) return HomeMenuItem::PLUGINS;
+    return hasOpdsServers ? HomeMenuItem::OPDS_BROWSER : HomeMenuItem::NONE;
+  }
+  bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
   uint8_t* coverBuffer = nullptr;  // HomeActivity's own buffer for cover image
   size_t coverBufferSize = 0;      // Bytes allocated to coverBuffer
+  // Output polarity the snapshot was taken in (night mode stores images pre-inverted).
+  bool coverBufferInverted = false;
   // Logical rect last passed to drawRecentBookCover. The cover snapshot only
   // needs to cover this region, not the entire framebuffer, so we cache the
   // tile instead of all 48 KB. Set in render() before the call.
@@ -39,56 +53,68 @@ class HomeActivity final : public Activity {
 
   std::vector<RecentBook> recentBooks;
   const HomeMenuItem initialMenuItem;
+  const bool cleanInitialRefresh;
 
   // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, bool hasOpdsUrl) {
+  static int menuItemToIndex(HomeMenuItem item, HomeMenuItem slot) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
     ++i;
-    if (item == HomeMenuItem::RECENTS) return i;
+    if (item == HomeMenuItem::LIBRARY) return i;
     ++i;
-    if (item == HomeMenuItem::OPDS_BROWSER) return hasOpdsUrl ? i : 0;
-    if (hasOpdsUrl) ++i;
-    if (item == HomeMenuItem::FILE_TRANSFER) return i;
+    if (slot != HomeMenuItem::NONE && item == slot) return i;
+    if (item == HomeMenuItem::PLUGINS) return 0;
+    if (slot != HomeMenuItem::NONE) ++i;
+    // File Transfer also opens the OPDS browser, so it returns there without its slot.
+    if (item == HomeMenuItem::FILE_TRANSFER || item == HomeMenuItem::OPDS_BROWSER) return i;
     ++i;
     if (item == HomeMenuItem::SETTINGS_MENU) return i;
     return 0;
   }
 
   // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, bool hasOpdsUrl) {
+  static HomeMenuItem indexToMenuItem(int idx, HomeMenuItem slot) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
-    if (idx == i++) return HomeMenuItem::RECENTS;
-    if (hasOpdsUrl && idx == i++) return HomeMenuItem::OPDS_BROWSER;
+    if (idx == i++) return HomeMenuItem::LIBRARY;
+    if (slot != HomeMenuItem::NONE && idx == i++) return slot;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
   }
-  void onSelectBook(const std::string& path);
+  void onRecentBookSelected(const std::string& path);
   void onFileBrowserOpen();
-  void onRecentsOpen();
+  void onLibraryOpen();
   void onSettingsOpen();
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
+  void onPluginsOpen();
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
+  // Standard icon-menu labels/icons (Browse, Library, optional Plugins/OPDS slot, Transfer, Settings).
+  void appendHomeMenu(std::vector<const char*>& items, std::vector<UIIcon>& icons) const;
   void preRenderCarouselFrames();
   void freeCarouselFrames();
   void renderCarouselFrame(int bookIdx, int slotIdx);
   void updateSlidingWindowCache(int centerIdx, int bookCount);
   void loadRecentBooks(int maxBooks);
   void loadRecentCovers(int coverHeight);
+  void fillCoverGridFromLibrary();
+  void resolveGridCoverPaths();
+  void loadGridCover(RecentBook& book, int height, bool& showingLoading, Rect& popupRect);
 
  public:
   explicit HomeActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
-                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE)
-      : Activity("Home", renderer, mappedInput), initialMenuItem(initialMenuItemValue) {}
+                        HomeMenuItem initialMenuItemValue = HomeMenuItem::NONE, bool cleanInitialRefresh = false)
+      : Activity("Home", renderer, mappedInput),
+        initialMenuItem(initialMenuItemValue),
+        cleanInitialRefresh(cleanInitialRefresh) {}
   void onEnter() override;
   void onExit() override;
   void loop() override;
   void render(RenderLock&&) override;
+  bool isHomeActivity() const override { return true; }
 };

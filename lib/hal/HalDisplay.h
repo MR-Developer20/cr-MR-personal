@@ -1,9 +1,32 @@
 #pragma once
 #include <Arduino.h>
+#include <BoardConfig.h>
 #include <EInkDisplay.h>
 
 class HalDisplay {
  public:
+  using Controller = BoardConfig::DisplayController;
+  Controller getController() const;
+
+  using GrayscaleMode = freeink::GrayscaleMode;
+  using GrayscaleCapabilities = freeink::GrayscaleCapabilities;
+  using GrayscaleBase = freeink::GrayscaleBase;
+  using GrayscaleEncoding = freeink::GrayscaleEncoding;
+
+  // When checking stripUploads, pass the grayscale mode used for the planes.
+  GrayscaleCapabilities grayscaleCapabilities(GrayscaleMode mode = GrayscaleMode::Overlay) const;
+  // Controller of the driver chosen at boot (null if the driver does not say).
+  const char* controllerName() const { return einkDisplay.getControllerName(); }
+  // Part number of the panel the boot probe identified (null if unknown).
+  const char* panelName() const { return einkDisplay.getPanelName(); }
+  // True while book pages are presented; panels with a reading waveform use it.
+  void setReaderRefresh(bool reading) { einkDisplay.setReaderRefresh(reading); }
+  // True asks text-overlay gray passes for every gray level (image pages).
+  void setOverlayFullTone(bool fullTone) { einkDisplay.setOverlayFullTone(fullTone); }
+  bool displayRetainedGrayscaleOverlay(uint16_t x, uint16_t y, uint16_t w, uint16_t h, bool restore) {
+    return einkDisplay.displayRetainedGrayscaleOverlay(x, y, w, h, restore);
+  }
+
   // Constructor with pin configuration
   HalDisplay();
 
@@ -35,14 +58,29 @@ class HalDisplay {
   void clearScreen(uint8_t color = 0xFF) const;
   void drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
                  bool fromProgmem = false) const;
-  void drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                            bool fromProgmem = false) const;
 
   void displayBuffer(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
-  void refreshDisplay(RefreshMode mode = RefreshMode::FAST_REFRESH, bool turnOffScreen = false);
+  // Non-blocking refresh (shadow-free): starts the panel waveform and returns
+  // while the panel refreshes on its own. The framebuffer must stay untouched
+  // until waitRefreshComplete(), and the caller must rebuild the differential
+  // baseline before the next differential update (the tiled grayscale cleanup
+  // does). Panels without deferral fall back to a blocking refresh.
+  void displayBufferAsync(RefreshMode mode = RefreshMode::FAST_REFRESH);
+  // Block until a pending deferred refresh completes (no-op when none is).
+  void waitRefreshComplete();
+  // True when displayBufferAsync() genuinely overlaps (panel driver defers);
+  // false where it falls back to a blocking refresh.
+  bool supportsAsyncRefresh() const;
+
+  // Output polarity. The framebuffer remains in normal polarity; inversion is
+  // applied by the display driver while sending it to the panel.
+  void setInverted(bool inverted);
+  bool isInverted() const;
 
   // Power management
   void deepSleep();
+  // Power the panel down between frames, keeping its image; the next paint wakes it.
+  void controllerIdle();
 
   // Access to frame buffer
   uint8_t* getFrameBuffer() const;
@@ -67,8 +105,8 @@ class HalDisplay {
   // displayBuffer(HALF); FAST fallback keeps the OEM differential base waveform
   // ("AA-pre-BW(mid)"). Other panels display normally with `fallback` mode.
   void displayGrayscaleBase(RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
+  bool displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallback = HALF_REFRESH, bool turnOffScreen = false);
 
-  void copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer);
   void copyGrayscaleLsbBuffers(const uint8_t* lsbBuffer);
   void copyGrayscaleMsbBuffers(const uint8_t* msbBuffer);
   void cleanupGrayscaleBuffers(const uint8_t* bwBuffer);
@@ -76,10 +114,9 @@ class HalDisplay {
   void displayGrayBuffer(bool turnOffScreen = false);
 
   // Tiled grayscale: stream one band of a plane (lsbPlane selects LSB/MSB RAM)
-  // straight to the controller; supportsStripGrayscale() gates the path. See
-  // EInkDisplay::writeGrayscalePlaneStrip.
+  // straight to the controller. Check grayscaleCapabilities(mode).stripUploads
+  // with the same grayscale mode used for the planes.
   void writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, uint16_t yStart, uint16_t numRows);
-  bool supportsStripGrayscale() const;
 
   // Runtime geometry passthrough
   uint16_t getDisplayWidth() const;
