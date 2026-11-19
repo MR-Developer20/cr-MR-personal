@@ -31,7 +31,7 @@
 // ---------------------------------------------------------------------------
 // Static carousel frame cache — survives HomeActivity re-creation so that
 // returning to home (e.g. after settings) doesn't re-read covers from SD.
-// Freed in onExit() and again in onSelectBook() before entering the reader.
+// Freed in onExit() and again in onRecentBookSelected() before entering the reader.
 // ---------------------------------------------------------------------------
 namespace {
 uint8_t* gCachedFrames[HomeActivity::kCarouselFrameCount] = {};
