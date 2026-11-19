@@ -10,6 +10,11 @@ name: Dual-OS bins
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Publish the built images to this release tag (created at the dispatched commit if it does not exist yet). Leave empty to only build.'
+        required: false
+        default: ''
   push:
     tags:
       - '*'
@@ -155,7 +160,7 @@ jobs:
   # Tag pushes publish both app images (plus the CrossPoint bootloader and partition
   # table) as release assets. The release is created as a pre-release if it does not exist yet.
   release:
-    if: startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
     needs: [build-crosspoint, build-biscuit]
     runs-on: ubuntu-latest
     permissions:
@@ -174,13 +179,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
         run: |
           set -euo pipefail
           mapfile -t files < <(find artifacts -type f -name '*.bin' | sort)
           printf 'Uploading:\n'; printf '  %s\n' "${files[@]}"
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
-            gh release upload "$GITHUB_REF_NAME" "${files[@]}" --clobber
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${files[@]}" --clobber
           else
-            gh release create "$GITHUB_REF_NAME" "${files[@]}" \
-              --title "$GITHUB_REF_NAME" --prerelease --generate-notes
+            # --target creates the tag at the built commit when it does not exist yet.
+            gh release create "$RELEASE_TAG" "${files[@]}" --target "$GITHUB_SHA" \
+              --title "$RELEASE_TAG" --prerelease --generate-notes
           fi
