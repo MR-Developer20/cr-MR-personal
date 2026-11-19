@@ -807,3 +807,31 @@ Book moves rename the store and its `.deleted` journal (plus recovery sidecars)
 together. The stored source path is informational and is refreshed on the next
 save; the current file path selects the store. Local book deletion cleans up all
 of these sidecars but preserves the independent `My Clippings.txt` export.
+
+## To-do list (`/.crosspoint/todo.json`)
+
+Written by `TodoStore` (`src/TodoStore.cpp`) while the To-do screen is open, and only when something changed. The
+list is loaded when the screen opens and released when it closes. Format version 1:
+
+```json
+{
+  "version": 1,
+  "rev": 42,
+  "items": [{ "id": "5f431f29eab058ba", "text": "Buy milk", "done": false, "rev": 3, "seq": 40, "order": 2048 }],
+  "deleted": [{ "id": "484d45672c4f9869", "rev": 2, "seq": 41 }]
+}
+```
+
+| Field | Rule |
+| --- | --- |
+| `version` | `1`. A file with a higher version is not used; it is renamed to `todo.json.bak`. |
+| `rev` | List revision, +1 for every change. |
+| `id` | 16 hex characters (a non-zero 64-bit id), unique across `items` and `deleted`. |
+| `text` | UTF-8, sanitized, at most 120 bytes, never empty for a live item. |
+| `done` | Live items only. |
+| `rev` (item), `seq` | Per-record revision and change order. They are reserved for sync with a companion app and are not used on the device yet. |
+| `order` | Display position, ascending; ties are broken by `id`. |
+
+Limits: 100 live items, 64 tombstones in `deleted` (the lowest `seq` is dropped first). Missing numbers and booleans
+read as `0` and `false`; a missing array reads as empty. An unreadable file is copied aside to `todo.json.bak` before
+anything is saved, so a later save cannot overwrite it with an empty list.

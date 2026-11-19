@@ -9,7 +9,10 @@ class GfxRenderer;
 namespace Lyra3CoversMetrics {
 constexpr ThemeMetrics values = [] {
   ThemeMetrics v = LyraMetrics::values;
-  v.homeCoverTileHeight = 300;
+  // 40 px shorter than before so the six-row Home menu (To-do plus a Plugins/OPDS entry) clears the button
+  // hints: the menu now starts at 56 + 260 + 16 = 332 and its sixth row ends at 756, above the hints at 760.
+  v.homeCoverHeight = LyraMetrics::values.homeCoverHeight - 40;
+  v.homeCoverTileHeight = 260;
   v.homeRecentBooksCount = 3;
   return v;
 }();

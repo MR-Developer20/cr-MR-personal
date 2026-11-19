@@ -64,6 +64,7 @@ void invalidateCarouselCache() {
 
 int HomeActivity::getMenuItemCount() const {
   int count = 4;  // File Browser, Library, File transfer, Settings
+  if (hasTodoEntry()) count++;
   if (!recentBooks.empty()) {
     count += recentBooks.size();
   }
@@ -79,6 +80,11 @@ void HomeActivity::appendHomeMenu(std::vector<const char*>& items, std::vector<U
   if (slotItem() != HomeMenuItem::NONE) {
     items.insert(items.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
     icons.insert(icons.begin() + 2, hasPlugins ? Plugins : Book);
+  }
+  if (hasTodoEntry()) {
+    const int todoAt = slotItem() != HomeMenuItem::NONE ? 3 : 2;
+    items.insert(items.begin() + todoAt, tr(STR_TODO_TITLE));
+    icons.insert(icons.begin() + todoAt, Todo);
   }
 }
 
@@ -386,7 +392,8 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, slotItem());
+  selectorIndex =
+      initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, slotItem(), hasTodoEntry());
 
   // Pre-render carousel frames before the first display update so the fast
   // path is active from render #1. Cache hit = instant. Cache miss = SD reads
@@ -578,7 +585,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, slotItem())) {
+    switch (indexToMenuItem(menuIndex, slotItem(), hasTodoEntry())) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;
@@ -590,6 +597,9 @@ void HomeActivity::loop() {
         break;
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
+        break;
+      case HomeMenuItem::TODO:
+        onTodoOpen();
         break;
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
@@ -822,8 +832,8 @@ void HomeActivity::render(RenderLock&&) {
 
       std::vector<const char*> menuItems;
       std::vector<UIIcon> menuIcons;
-      menuItems.reserve(5);
-      menuIcons.reserve(5);
+      menuItems.reserve(7);
+      menuIcons.reserve(7);
       appendHomeMenu(menuItems, menuIcons);
 
       GUI.drawButtonMenu(
@@ -923,8 +933,8 @@ void HomeActivity::render(RenderLock&&) {
   // Build menu items dynamically
   std::vector<const char*> menuItems;
   std::vector<UIIcon> menuIcons;
-  menuItems.reserve(6);
-  menuIcons.reserve(6);
+  menuItems.reserve(7);
+  menuIcons.reserve(7);
   appendHomeMenu(menuItems, menuIcons);
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -978,3 +988,5 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(); }
+
+void HomeActivity::onTodoOpen() { activityManager.goToTodo(); }

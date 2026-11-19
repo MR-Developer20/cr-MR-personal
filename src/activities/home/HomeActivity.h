@@ -32,6 +32,9 @@ class HomeActivity final : public Activity {
     if (hasPlugins) return HomeMenuItem::PLUGINS;
     return hasOpdsServers ? HomeMenuItem::OPDS_BROWSER : HomeMenuItem::NONE;
   }
+  // The To-do entry sits before File Transfer. The cover-grid home has a fixed icon-tab strip with no
+  // slot for it, so that layout leaves it out (the grid is PSRAM-only; the X3/X4 never use it).
+  bool hasTodoEntry() const { return coverGridUi == nullptr; }
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -56,7 +59,7 @@ class HomeActivity final : public Activity {
   const bool cleanInitialRefresh;
 
   // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, HomeMenuItem slot) {
+  static int menuItemToIndex(HomeMenuItem item, HomeMenuItem slot, bool todo) {
     int i = 0;
     if (item == HomeMenuItem::FILE_BROWSER) return i;
     ++i;
@@ -65,6 +68,10 @@ class HomeActivity final : public Activity {
     if (slot != HomeMenuItem::NONE && item == slot) return i;
     if (item == HomeMenuItem::PLUGINS) return 0;
     if (slot != HomeMenuItem::NONE) ++i;
+    if (todo) {
+      if (item == HomeMenuItem::TODO) return i;
+      ++i;
+    }
     // File Transfer also opens the OPDS browser, so it returns there without its slot.
     if (item == HomeMenuItem::FILE_TRANSFER || item == HomeMenuItem::OPDS_BROWSER) return i;
     ++i;
@@ -73,11 +80,12 @@ class HomeActivity final : public Activity {
   }
 
   // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, HomeMenuItem slot) {
+  static HomeMenuItem indexToMenuItem(int idx, HomeMenuItem slot, bool todo) {
     int i = 0;
     if (idx == i++) return HomeMenuItem::FILE_BROWSER;
     if (idx == i++) return HomeMenuItem::LIBRARY;
     if (slot != HomeMenuItem::NONE && idx == i++) return slot;
+    if (todo && idx == i++) return HomeMenuItem::TODO;
     if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
     if (idx == i) return HomeMenuItem::SETTINGS_MENU;
     return HomeMenuItem::NONE;
@@ -89,6 +97,7 @@ class HomeActivity final : public Activity {
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
   void onPluginsOpen();
+  void onTodoOpen();
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image

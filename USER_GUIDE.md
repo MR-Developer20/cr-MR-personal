@@ -37,6 +37,7 @@ Welcome to the **CrossPoint** firmware. This guide outlines the hardware control
       - [Cover settings](#cover-settings)
       - [Custom images](#custom-images)
     - [3.8 Custom Fonts (SD Card)](#38-custom-fonts-sd-card)
+    - [3.9 To-do List](#39-to-do-list)
   - [4. Reading Mode](#4-reading-mode)
     - [Page Turning](#page-turning)
     - [Chapter Navigation](#chapter-navigation)
@@ -109,7 +110,7 @@ Upon turning the device on for the first time, you will be placed on the **[Home
 
 ### 3.1 Home Screen
 
-The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, **[Browse Files](#33-browse-files-screen)**, the **[Library](#34-library-screen)**, **[File Transfer](#35-file-transfer-screen)**, or **[Settings](#36-settings)**.
+The Home screen is the main entry point to the firmware. From here you can navigate to **[Reading Mode](#4-reading-mode)** with the most recently read book, **[Browse Files](#33-browse-files-screen)**, the **[Library](#34-library-screen)**, your **[To-do](#39-to-do-list)** list, **[File Transfer](#35-file-transfer-screen)**, or **[Settings](#36-settings)**.
 
 ### 3.2 Reading Mode
 
@@ -644,6 +645,16 @@ If the reader shows **Damaged font file**, a `.cpfont` file on the SD card is br
 See [docs/sd-card-fonts.md](./docs/sd-card-fonts.md) for full installation details and SD card folder structure.
 
 ---
+
+### 3.9 To-do List
+
+Open **To-do** from the Home Screen to keep a simple checklist on the device. The list is stored on the SD card at `/.crosspoint/todo.json` and holds up to 100 items of up to 120 bytes of text each (fewer characters for non-Latin scripts). To-do is not shown on the cover-grid Home layout, which is only available on boards with PSRAM.
+
+- **Check / uncheck an item:** select it and press **Confirm**. Each row has a checkbox that shows whether the item is done.
+- **Add an item:** select **+ Add item** at the bottom of the list and type it with the on-screen keyboard. The cursor stays on **+ Add item** so you can add several in a row.
+- **Edit, reorder or delete:** hold **Confirm** on an item for one second (or long-press it on a touch screen) to open the options: **Edit**, **Move up**, **Move down**, **Delete**, and **Delete completed** (asks for confirmation).
+
+Changes are saved when you leave the screen, and also 10 seconds after your last change. If `todo.json` can't be read, it is renamed to `todo.json.bak` instead of being overwritten.
 
 ## 4. Reading Mode
 
