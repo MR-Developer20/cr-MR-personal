@@ -457,13 +457,13 @@ std::string_view headingStyle(int level) {
 // Percent-encodes everything outside the RFC 3986 unreserved set (plus '/'), byte by byte, so the
 // EPUB layout code's URI decoding recovers the original path and the attribute stays well-formed.
 void writeUriEncoded(Writer& w, std::string_view s) {
-  static constexpr char HEX[] = "0123456789ABCDEF";
+  static constexpr char HEX_DIGITS[] = "0123456789ABCDEF";
   for (const char c : s) {
     const unsigned char u = static_cast<unsigned char>(c);
     if (isalnum(u) || c == '-' || c == '.' || c == '_' || c == '~' || c == '/') {
       w.write(&c, 1);
     } else {
-      const char enc[3] = {'%', HEX[u >> 4], HEX[u & 0x0F]};
+      const char enc[3] = {'%', HEX_DIGITS[u >> 4], HEX_DIGITS[u & 0x0F]};
       w.write(enc, 3);
     }
   }

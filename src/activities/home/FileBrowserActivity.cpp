@@ -132,8 +132,7 @@ void FileBrowserActivity::loadFiles() {
           files.emplace_back(filename);
         }
       } else if (FsHelpers::hasReflowableBookExtension(filename) || FsHelpers::hasXtcExtension(filename) ||
-                 FsHelpers::hasImageExtension(filename) ||
-                 FsHelpers::hasJwpubExtension(filename)) {
+                 FsHelpers::hasImageExtension(filename) || FsHelpers::hasJwpubExtension(filename)) {
         files.emplace_back(filename);
       }
     }
