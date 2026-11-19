@@ -208,6 +208,9 @@ void SettingsActivity::rebuildSettings() {
   if (!BoardConfig::isPicco()) {
     addAction(SettingsSection::General, StrId::STR_CHECK_UPDATES, SettingAction::CheckForUpdates);
     addAction(SettingsSection::General, StrId::STR_SD_FIRMWARE_UPDATE, SettingAction::SdFirmwareUpdate);
+    // Always listed, even with a blank second slot: probing flash during list rebuild would add
+    // I/O to every settings visit; the activity itself reports "No other OS installed".
+    addAction(SettingsSection::General, StrId::STR_SWITCH_OS, SettingAction::SwapBootSlot);
   }
   addAction(SettingsSection::General, StrId::STR_ABOUT, SettingAction::About);
   rebuildRowItems();

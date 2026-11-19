@@ -619,8 +619,18 @@ void setup() {
   const auto recoveryButton = (BoardConfig::isX4Pro() || BoardConfig::isX4Classic()) ? MappedInputManager::Button::Down
                                                                                      : MappedInputManager::Button::Up;
   // The Picco has no second app slot to flash into (partitions_picco.csv).
-  const bool recoveryFirmwareMode = wakeupReason == HalGPIO::WakeupReason::PowerButton && !BoardConfig::isPaperMono() &&
-                                    !BoardConfig::isPicco() && mappedInputManager.isPressed(recoveryButton);
+  const bool bootChordEligible =
+      wakeupReason == HalGPIO::WakeupReason::PowerButton && !BoardConfig::isPaperMono() && !BoardConfig::isPicco();
+  // Dual-OS boards (the ESP32-C3 X3/X4) pair two chords: UP + DOWN + POWER opens the SD recovery
+  // firmware picker and UP + POWER switches to the other OS (biscuit's UP + POWER switches back).
+  // DOWN alone is deliberately left free: POWER+DOWN is the runtime screenshot chord (see loop())
+  // and would otherwise hijack wake-from-sleep. Other boards keep the single-key recovery gesture.
+  const bool dualOsBoard = gpio.deviceIsX3() || gpio.deviceIsX4();
+  const bool upHeld = bootChordEligible && mappedInputManager.isPressed(MappedInputManager::Button::Up);
+  const bool downHeld = bootChordEligible && mappedInputManager.isPressed(MappedInputManager::Button::Down);
+  const bool recoveryFirmwareMode =
+      bootChordEligible && (dualOsBoard ? (upHeld && downHeld) : mappedInputManager.isPressed(recoveryButton));
+  const bool bootSwapMode = dualOsBoard && upHeld && !downHeld;
 
   halTiltSensor.begin();
   halClock.begin();
@@ -648,7 +658,11 @@ void setup() {
 
   if (recoveryFirmwareMode) {
     LOG_INF("MAIN", "Recovery firmware mode (%s + POWER held at boot)",
-            (BoardConfig::isX4Pro() || BoardConfig::isX4Classic()) ? "DOWN" : "UP");
+            dualOsBoard                                              ? "UP + DOWN"
+            : (BoardConfig::isX4Pro() || BoardConfig::isX4Classic()) ? "DOWN"
+                                                                     : "UP");
+  } else if (bootSwapMode) {
+    LOG_INF("MAIN", "Boot swap mode (UP + POWER held at boot)");
   }
 
   // Touch boards default the reader menu to the toolbar overlay instead of the
@@ -802,6 +816,9 @@ void setup() {
     // Skip normal home/reader routing: jump straight into the SD firmware picker.
     activityManager.replaceActivity(
         std::make_unique<SdFirmwareUpdateActivity>(renderer, mappedInputManager, /*recoveryMode=*/true));
+  } else if (bootSwapMode) {
+    activityManager.replaceActivity(
+        std::make_unique<SwapBootSlotActivity>(renderer, mappedInputManager, /*bootMode=*/true));
   } else if (rebootedFromPanic) {
     // If we rebooted from a panic, go to crash report screen to show the panic info
     activityManager.goToCrashReport();

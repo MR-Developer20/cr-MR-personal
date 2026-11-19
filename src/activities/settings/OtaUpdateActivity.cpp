@@ -66,6 +66,17 @@ void OtaUpdateActivity::onWifiSelectionComplete(const bool success) {
   // matching the pre-popup layout (Back = cancel, Confirm = update).
   confirmPopup.show(tr(STR_NEW_UPDATE), options, 2, 1, [this](const int idx) {
     if (idx == 1) {
+      // Dual-OS guard: the updater streams into the passive slot, so a bootable image there
+      // (e.g. the other OS) is destroyed by this update. A blank slot skips the extra prompt.
+      boot_switch::PassiveSlotInfo info = {};
+      if (boot_switch::peekPassiveSlot(info)) {
+        char body[64];
+        boot_switch::describeSlot(info, body, sizeof(body));
+        startActivityForResult(std::make_unique<ConfirmationActivity>(
+                                   renderer, mappedInput, tr(STR_OVERWRITE_OTHER_OS_PROMPT), std::string(body)),
+                               [this](const ActivityResult& result) { onOverwriteWarningResult(result); });
+        return;
+      }
       runUpdateInstall();
     } else {
       finish();
@@ -178,6 +189,15 @@ void OtaUpdateActivity::render(RenderLock&&) {
   }
 
   renderer.displayBuffer();
+}
+
+void OtaUpdateActivity::onOverwriteWarningResult(const ActivityResult& result) {
+  if (result.isCancelled) {
+    // The update popup is already dismissed at this point, so leave the OTA screen.
+    finish();
+    return;
+  }
+  runUpdateInstall();
 }
 
 void OtaUpdateActivity::runUpdateInstall() {

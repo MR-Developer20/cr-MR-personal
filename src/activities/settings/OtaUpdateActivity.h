@@ -32,6 +32,7 @@ class OtaUpdateActivity : public Activity {
 
   void onWifiSelectionComplete(bool success);
   void runUpdateInstall();
+  void onOverwriteWarningResult(const ActivityResult& result);
 
  public:
   explicit OtaUpdateActivity(GfxRenderer& renderer, MappedInputManager& mappedInput)
