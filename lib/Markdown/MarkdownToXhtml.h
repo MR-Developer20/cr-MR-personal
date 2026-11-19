@@ -1,13 +1,14 @@
 #pragma once
 
+#include <Print.h>
+
 #include <cstdint>
 #include <string>
 #include <vector>
 
-// Streaming CommonMark-core -> XHTML converter. Feeds lib/Markdown/Markdown.cpp, which
-// packages the result as a synthetic EPUB so a .md file renders through the existing EPUB
-// engine (lib/Epub) instead of a second layout engine. Reads the source and writes the
-// output in small bounded chunks; never holds the whole document in RAM.
+// Streaming CommonMark-core -> XHTML converter. Feeds lib/Txt, which serves the result to the
+// EPUB engine as the single spine item of a .md book. Reads the source and writes the output in
+// small bounded chunks; never holds the whole document in RAM.
 //
 // This is a practical subset of CommonMark, not a full implementation. Simplifications,
 // all chosen to keep the parser single-pass and bounded-memory while still covering the
@@ -40,22 +41,15 @@ class MarkdownToXhtml {
     std::string anchorId;  // "h0", "h1", ... in document order
   };
 
-  // A locally-embeddable image referenced by the document.
-  struct ImageRef {
-    std::string sdPath;        // full path to the source image on SD
-    std::string zipEntryName;  // "OEBPS/images/imgN.ext" — matches the <img src> emitted
-  };
-
   struct Result {
     bool ok = false;
-    uint32_t crc32 = 0;   // of the generated XHTML written to dstPath
-    uint32_t size = 0;    // bytes written to dstPath
     std::string firstH1;  // raw text of the first top-level heading, empty if none
     std::vector<Heading> headings;
-    std::vector<ImageRef> images;
   };
 
-  // Converts `srcPath` (a .md file already on SD) into a complete XHTML document written to
-  // `dstPath` (created/overwritten).
-  static Result convert(const std::string& srcPath, const std::string& dstPath);
+  // Converts `srcPath` (a .md file on SD) into a complete XHTML document streamed to `out`.
+  // `headerComment` (e.g. an HTML cache-version tag) is emitted right after the XML declaration
+  // when non-null. Local JPEG/PNG images are referenced by their original relative path,
+  // percent-encoded; the caller is responsible for serving them (see Txt::resolveCompanionResource).
+  static Result convert(const std::string& srcPath, Print& out, const char* headerComment = nullptr);
 };

@@ -5,6 +5,7 @@
 #include <HalStorage.h>
 #include <JpegToBmpConverter.h>
 #include <Logging.h>
+#include <MarkdownToXhtml.h>
 #include <Memory.h>
 #include <PngToBmpConverter.h>
 #include <Serialization.h>
@@ -94,8 +95,29 @@ bool Txt::convertCoverImageToBmp(const std::string& imagePath, const std::string
   return success;
 }
 
+namespace {
+// Discards output; lets the Markdown converter run purely to collect its heading list.
+class NullPrint : public Print {
+ public:
+  size_t write(uint8_t) override { return 1; }
+  size_t write(const uint8_t*, size_t size) override { return size; }
+};
+}  // namespace
+
+std::string Txt::resolveCompanionResource(const std::string& filepath, const std::string& href) {
+  if (href.empty() || href.front() == '/' || href.find("..") != std::string::npos) return "";
+  if (!FsHelpers::hasJpgExtension(href) && !FsHelpers::hasPngExtension(href)) return "";
+  const std::string folder = FsHelpers::extractFolderPath(filepath);
+  return folder + (!folder.empty() && folder.back() == '/' ? "" : "/") + href;
+}
+
 bool Txt::streamTxtToHtml(const std::string& filepath, Print& out) {
   const uint32_t t0 = millis();
+  if (FsHelpers::hasMarkdownExtension(filepath)) {
+    const bool ok = MarkdownToXhtml::convert(filepath, out, TxtToHtml::cacheVersionTag(filepath)).ok;
+    LOG_DBG("TXT", "Converted Markdown to XHTML in %lu ms: %s", millis() - t0, filepath.c_str());
+    return ok;
+  }
   HalFile src;
   if (!Storage.openFileForRead("TXT", filepath, src)) {
     LOG_ERR("TXT", "Failed to open TXT/MD for streaming: %s", filepath.c_str());
@@ -184,7 +206,7 @@ bool Txt::buildTxtCache(const std::string& filepath, const std::string& cachePat
     return false;
   }
 
-  bookMetadataCache->createSpineEntry("content.html");
+  bookMetadataCache->createSpineEntry(CONTENT_HREF);
 
   if (!bookMetadataCache->endContentOpfPass()) {
     LOG_ERR("TXT", "Could not end writing content.opf pass");
@@ -197,7 +219,23 @@ bool Txt::buildTxtCache(const std::string& filepath, const std::string& cachePat
   }
 
   std::string title = FsHelpers::getFileNameWithoutExtension(filepath);
-  bookMetadataCache->createTocEntry(title, "content.html", "", 0);
+  bool wroteHeadingToc = false;
+  if (FsHelpers::hasMarkdownExtension(filepath)) {
+    // One TOC entry per ATX heading, anchored to the id the converter puts on it.
+    NullPrint sink;
+    const auto md = MarkdownToXhtml::convert(filepath, sink);
+    if (md.ok) {
+      for (const auto& heading : md.headings) {
+        if (heading.text.empty()) continue;
+        bookMetadataCache->createTocEntry(heading.text, CONTENT_HREF, heading.anchorId,
+                                          static_cast<uint8_t>(heading.level - 1));
+        wroteHeadingToc = true;
+      }
+    }
+  }
+  if (!wroteHeadingToc) {
+    bookMetadataCache->createTocEntry(title, CONTENT_HREF, "", 0);
+  }
 
   if (!bookMetadataCache->endTocPass()) {
     LOG_ERR("TXT", "Could not end writing toc pass");

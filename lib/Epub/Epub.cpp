@@ -15,6 +15,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string_view>
@@ -1135,7 +1136,29 @@ bool Epub::readItemContentsToStream(const std::string& itemHref, Print& out, con
   }
 
   if (Txt::isTxtOrMd(filepath)) {
-    return Txt::streamTxtToHtml(filepath, out);
+    if (itemHref == Txt::CONTENT_HREF) {
+      return Txt::streamTxtToHtml(filepath, out);
+    }
+    // Anything else a TXT/MD book references is an image next to the source file.
+    const std::string imagePath = Txt::resolveCompanionResource(filepath, FsHelpers::normalisePath(itemHref));
+    if (imagePath.empty()) {
+      LOG_DBG("EBP", "Rejected TXT/MD resource: %s", itemHref.c_str());
+      return false;
+    }
+    HalFile image;
+    if (!Storage.openFileForRead("EBP", imagePath, image)) return false;
+    // One transient buffer, freed on return; capped so a large chunkSize can't fragment DRAM.
+    const size_t bufSize = std::min<size_t>(chunkSize, 4096);
+    auto chunk = makeUniqueNoThrow<uint8_t[]>(bufSize);
+    if (!chunk) {
+      LOG_ERR("EBP", "OOM: %zu bytes for resource copy", bufSize);
+      return false;
+    }
+    int n;
+    while ((n = image.read(chunk.get(), bufSize)) > 0) {
+      if (out.write(chunk.get(), static_cast<size_t>(n)) != static_cast<size_t>(n)) return false;
+    }
+    return n == 0;
   }
 
   const std::string path = FsHelpers::normalisePath(itemHref);
@@ -1173,7 +1196,10 @@ bool Epub::extractItemToFile(const std::string& itemHref, const std::string& des
 bool Epub::getItemSize(const std::string& itemHref, size_t* size) const {
   if (Txt::isTxtOrMd(filepath)) {
     HalFile f;
-    if (Storage.openFileForRead("EBP", filepath, f)) {
+    const std::string resource = itemHref == Txt::CONTENT_HREF
+                                     ? filepath
+                                     : Txt::resolveCompanionResource(filepath, FsHelpers::normalisePath(itemHref));
+    if (!resource.empty() && Storage.openFileForRead("EBP", resource, f)) {
       if (size) *size = f.size();
       return true;
     }
