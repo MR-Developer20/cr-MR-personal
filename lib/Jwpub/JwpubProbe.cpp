@@ -1,7 +1,7 @@
 #include "JwpubProbe.h"
 
 #include <HalStorage.h>
-#include <InflateReader.h>
+#include <InflateStream.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <MiniSqlite.h>
@@ -102,14 +102,17 @@ bool runOnDatabase(const std::string& dbPath, const uint8_t keyIv[JwpubCrypto::K
   }
 
   // zlib inflate the first chunk to confirm it is HTML.
-  InflateReader inf;
-  inf.init(false);
+  InflateStream inf;
+  if (!inf.init(/*streaming=*/true)) {
+    LOG_ERR("JWPROBE", "inflate init OOM");
+    return false;
+  }
   inf.setSource(blob.get(), clearLen);
-  inf.skipZlibHeader();
+  inf.setZlibWrapped();
   uint8_t html[192];
   size_t produced = 0;
-  const InflateStatus st = inf.readAtMost(html, sizeof(html) - 1, &produced);
-  if (st == InflateStatus::Error || produced == 0) {
+  const InflateStream::Status st = inf.readAtMost(html, sizeof(html) - 1, &produced);
+  if (st == InflateStream::Status::Error || produced == 0) {
     LOG_ERR("JWPROBE", "inflate failed");
     return false;
   }
