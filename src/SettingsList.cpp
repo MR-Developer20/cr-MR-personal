@@ -67,6 +67,20 @@ void forEachBaseSetting(SettingVisitor visit, void* context) {
   emit(SettingInfo::Toggle(StrId::STR_NIGHT_MODE, &CrossPointSettings::screenInverted, "screenInverted",
                            StrId::STR_CAT_DISPLAY));
 
+  // --- Home screen --- (which Home entries are shown; Settings is always shown)
+  emit(SettingInfo::Toggle(StrId::STR_BROWSE_FILES, &CrossPointSettings::homeShowBrowse, "homeShowBrowse",
+                           StrId::STR_CAT_HOME_SCREEN));
+  emit(SettingInfo::Toggle(StrId::STR_LIBRARY, &CrossPointSettings::homeShowLibrary, "homeShowLibrary",
+                           StrId::STR_CAT_HOME_SCREEN));
+  emit(SettingInfo::Toggle(StrId::STR_PLUGINS, &CrossPointSettings::homeShowPlugins, "homeShowPlugins",
+                           StrId::STR_CAT_HOME_SCREEN));
+  emit(SettingInfo::Toggle(StrId::STR_OPDS_BROWSER, &CrossPointSettings::homeShowOpds, "homeShowOpds",
+                           StrId::STR_CAT_HOME_SCREEN));
+  emit(SettingInfo::Toggle(StrId::STR_TODO_TITLE, &CrossPointSettings::homeShowTodo, "homeShowTodo",
+                           StrId::STR_CAT_HOME_SCREEN));
+  emit(SettingInfo::Toggle(StrId::STR_FILE_TRANSFER, &CrossPointSettings::homeShowTransfer, "homeShowTransfer",
+                           StrId::STR_CAT_HOME_SCREEN));
+
   // --- Reader ---
   // Built-in font-family entry. Replaced per-call with a registry-aware
   // version when SD fonts are installed.

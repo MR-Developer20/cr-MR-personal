@@ -62,29 +62,79 @@ void invalidateCarouselCache() {
 }
 }  // namespace
 
-int HomeActivity::getMenuItemCount() const {
-  int count = 4;  // File Browser, Library, File transfer, Settings
-  if (hasTodoEntry()) count++;
-  if (!recentBooks.empty()) {
-    count += recentBooks.size();
+int HomeActivity::getMenuItemCount() const { return menuEntryCount + static_cast<int>(recentBooks.size()); }
+
+void HomeActivity::rebuildMenuEntries() {
+  // The cover-grid home has a fixed icon-tab strip that can neither hide nor add entries, so it always shows
+  // the full set (without To-do).
+  const bool grid = coverGridUi != nullptr;
+  const auto shown = [grid](const uint8_t flag) { return grid || flag != 0; };
+  const HomeMenuItem slot = slotItem();
+
+  int n = 0;
+  if (shown(SETTINGS.homeShowBrowse)) menuEntries[n++] = HomeMenuItem::FILE_BROWSER;
+  if (shown(SETTINGS.homeShowLibrary)) menuEntries[n++] = HomeMenuItem::LIBRARY;
+  if (slot == HomeMenuItem::PLUGINS && shown(SETTINGS.homeShowPlugins)) menuEntries[n++] = HomeMenuItem::PLUGINS;
+  if (slot == HomeMenuItem::OPDS_BROWSER && shown(SETTINGS.homeShowOpds)) menuEntries[n++] = HomeMenuItem::OPDS_BROWSER;
+  if (!grid && SETTINGS.homeShowTodo != 0) menuEntries[n++] = HomeMenuItem::TODO;
+  if (shown(SETTINGS.homeShowTransfer)) menuEntries[n++] = HomeMenuItem::FILE_TRANSFER;
+  menuEntries[n++] = HomeMenuItem::SETTINGS_MENU;  // never hideable
+  menuEntryCount = n;
+}
+
+int HomeActivity::menuIndexOf(const HomeMenuItem item) const {
+  for (int i = 0; i < menuEntryCount; ++i) {
+    if (menuEntries[i] == item) return i;
   }
-  if (slotItem() != HomeMenuItem::NONE) {
-    count++;
+  // File Transfer also opens the OPDS browser, so it returns there when the OPDS entry isn't shown.
+  if (item == HomeMenuItem::OPDS_BROWSER) {
+    for (int i = 0; i < menuEntryCount; ++i) {
+      if (menuEntries[i] == HomeMenuItem::FILE_TRANSFER) return i;
+    }
   }
-  return count;
+  return 0;
+}
+
+HomeMenuItem HomeActivity::menuItemAt(const int index) const {
+  return index >= 0 && index < menuEntryCount ? menuEntries[index] : HomeMenuItem::NONE;
 }
 
 void HomeActivity::appendHomeMenu(std::vector<const char*>& items, std::vector<UIIcon>& icons) const {
-  items = {tr(STR_BROWSE_FILES), tr(STR_LIBRARY), tr(STR_FILE_TRANSFER), tr(STR_SETTINGS_TITLE)};
-  icons = {Folder, Library, Transfer, Settings};
-  if (slotItem() != HomeMenuItem::NONE) {
-    items.insert(items.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
-    icons.insert(icons.begin() + 2, hasPlugins ? Plugins : Book);
-  }
-  if (hasTodoEntry()) {
-    const int todoAt = slotItem() != HomeMenuItem::NONE ? 3 : 2;
-    items.insert(items.begin() + todoAt, tr(STR_TODO_TITLE));
-    icons.insert(icons.begin() + todoAt, Todo);
+  items.clear();
+  icons.clear();
+  for (int i = 0; i < menuEntryCount; ++i) {
+    switch (menuEntries[i]) {
+      case HomeMenuItem::FILE_BROWSER:
+        items.push_back(tr(STR_BROWSE_FILES));
+        icons.push_back(Folder);
+        break;
+      case HomeMenuItem::LIBRARY:
+        items.push_back(tr(STR_LIBRARY));
+        icons.push_back(Library);
+        break;
+      case HomeMenuItem::PLUGINS:
+        items.push_back(tr(STR_PLUGINS));
+        icons.push_back(Plugins);
+        break;
+      case HomeMenuItem::OPDS_BROWSER:
+        items.push_back(tr(STR_OPDS_BROWSER));
+        icons.push_back(Book);
+        break;
+      case HomeMenuItem::TODO:
+        items.push_back(tr(STR_TODO_TITLE));
+        icons.push_back(Todo);
+        break;
+      case HomeMenuItem::FILE_TRANSFER:
+        items.push_back(tr(STR_FILE_TRANSFER));
+        icons.push_back(Transfer);
+        break;
+      case HomeMenuItem::SETTINGS_MENU:
+        items.push_back(tr(STR_SETTINGS_TITLE));
+        icons.push_back(Settings);
+        break;
+      case HomeMenuItem::NONE:
+        break;
+    }
   }
 }
 
@@ -378,6 +428,7 @@ void HomeActivity::onEnter() {
     coverGridUi = makeUniqueNoThrow<CoverGridHomeUi>(renderer);
     if (!coverGridUi) LOG_ERR("HOME", "OOM: cover grid UI; using standard home");
   }
+  rebuildMenuEntries();  // needs hasPlugins/hasOpdsServers and the layout (coverGridUi) from above
   loadRecentBooks(coverGridUi ? CoverGridHomeUi::MAX_BOOKS : metrics.homeRecentBooksCount);
   hasContinueReading = !recentBooks.empty();
   if (coverGridUi) {
@@ -392,8 +443,7 @@ void HomeActivity::onEnter() {
   }
 
   const auto base = static_cast<int>(recentBooks.size());
-  selectorIndex =
-      initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuItemToIndex(initialMenuItem, slotItem(), hasTodoEntry());
+  selectorIndex = initialMenuItem == HomeMenuItem::NONE ? 0 : base + menuIndexOf(initialMenuItem);
 
   // Pre-render carousel frames before the first display update so the fast
   // path is active from render #1. Cache hit = instant. Cache miss = SD reads
@@ -585,7 +635,7 @@ void HomeActivity::loop() {
       return;
     }
     const int menuIndex = selectorIndex - static_cast<int>(recentBooks.size());
-    switch (indexToMenuItem(menuIndex, slotItem(), hasTodoEntry())) {
+    switch (menuItemAt(menuIndex)) {
       case HomeMenuItem::FILE_BROWSER:
         onFileBrowserOpen();
         break;

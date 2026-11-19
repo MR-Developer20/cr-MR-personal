@@ -357,6 +357,14 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   uint8_t longPressMenuFunction = LP_MENU_DISABLED;
   // UI Theme
   uint8_t uiTheme = LYRA;
+  // Home screen entries (1 = shown). Settings is always shown so it can't be locked out; the cover-grid
+  // home has a fixed tab strip and ignores these.
+  uint8_t homeShowBrowse = 1;
+  uint8_t homeShowLibrary = 1;
+  uint8_t homeShowPlugins = 1;
+  uint8_t homeShowOpds = 1;
+  uint8_t homeShowTodo = 1;
+  uint8_t homeShowTransfer = 1;
   // Sunlight fading compensation
   uint8_t fadingFix = 0;
   // The fading fix compensates the X4/X3 grayscale waveforms; other boards never get it.

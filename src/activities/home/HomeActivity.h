@@ -32,9 +32,6 @@ class HomeActivity final : public Activity {
     if (hasPlugins) return HomeMenuItem::PLUGINS;
     return hasOpdsServers ? HomeMenuItem::OPDS_BROWSER : HomeMenuItem::NONE;
   }
-  // The To-do entry sits before File Transfer. The cover-grid home has a fixed icon-tab strip with no
-  // slot for it, so that layout leaves it out (the grid is PSRAM-only; the X3/X4 never use it).
-  bool hasTodoEntry() const { return coverGridUi == nullptr; }
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
   bool coverBufferStored = false;  // Track if cover buffer is stored
@@ -58,38 +55,17 @@ class HomeActivity final : public Activity {
   const HomeMenuItem initialMenuItem;
   const bool cleanInitialRefresh;
 
-  // Convert HomeMenuItem to menu index (used in onEnter)
-  static int menuItemToIndex(HomeMenuItem item, HomeMenuItem slot, bool todo) {
-    int i = 0;
-    if (item == HomeMenuItem::FILE_BROWSER) return i;
-    ++i;
-    if (item == HomeMenuItem::LIBRARY) return i;
-    ++i;
-    if (slot != HomeMenuItem::NONE && item == slot) return i;
-    if (item == HomeMenuItem::PLUGINS) return 0;
-    if (slot != HomeMenuItem::NONE) ++i;
-    if (todo) {
-      if (item == HomeMenuItem::TODO) return i;
-      ++i;
-    }
-    // File Transfer also opens the OPDS browser, so it returns there without its slot.
-    if (item == HomeMenuItem::FILE_TRANSFER || item == HomeMenuItem::OPDS_BROWSER) return i;
-    ++i;
-    if (item == HomeMenuItem::SETTINGS_MENU) return i;
-    return 0;
-  }
-
-  // Convert menu index to HomeMenuItem (used in loop)
-  static HomeMenuItem indexToMenuItem(int idx, HomeMenuItem slot, bool todo) {
-    int i = 0;
-    if (idx == i++) return HomeMenuItem::FILE_BROWSER;
-    if (idx == i++) return HomeMenuItem::LIBRARY;
-    if (slot != HomeMenuItem::NONE && idx == i++) return slot;
-    if (todo && idx == i++) return HomeMenuItem::TODO;
-    if (idx == i++) return HomeMenuItem::FILE_TRANSFER;
-    if (idx == i) return HomeMenuItem::SETTINGS_MENU;
-    return HomeMenuItem::NONE;
-  }
+  // The icon-menu entries that are visible, in display order. Rebuilt in onEnter() from the Home screen
+  // settings; Settings is always last. Every count, label and index lookup derives from this one list.
+  static constexpr int MAX_MENU_ENTRIES = 6;  // Browse, Library, Plugins/OPDS, To-do, File Transfer, Settings
+  // The Home screen settings are read once, in onEnter(): they can't change while Home is on screen (the web
+  // settings page only runs from the File Transfer screen), and Home is rebuilt on every return.
+  HomeMenuItem menuEntries[MAX_MENU_ENTRIES] = {};
+  int menuEntryCount = 0;
+  void rebuildMenuEntries();
+  // Menu index of an item (used in onEnter); 0 when it isn't shown.
+  int menuIndexOf(HomeMenuItem item) const;
+  HomeMenuItem menuItemAt(int index) const;  // NONE when out of range (used in loop)
   void onRecentBookSelected(const std::string& path);
   void onFileBrowserOpen();
   void onLibraryOpen();
