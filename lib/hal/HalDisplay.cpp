@@ -10,6 +10,8 @@ HalDisplay::HalDisplay() : einkDisplay(EPD_SCLK, EPD_MOSI, EPD_CS, EPD_DC, EPD_R
 
 HalDisplay::~HalDisplay() {}
 
+HalDisplay::Controller HalDisplay::getController() const { return BoardConfig::ACTIVE.displayController; }
+
 void HalDisplay::begin(bool seamless) {
   // Set X3-specific panel mode before initializing.
   if (gpio.deviceIsX3()) {
@@ -40,11 +42,6 @@ void HalDisplay::drawImage(const uint8_t* imageData, uint16_t x, uint16_t y, uin
   einkDisplay.drawImage(imageData, x, y, w, h, fromProgmem);
 }
 
-void HalDisplay::drawImageTransparent(const uint8_t* imageData, uint16_t x, uint16_t y, uint16_t w, uint16_t h,
-                                      bool fromProgmem) const {
-  einkDisplay.drawImageTransparent(imageData, x, y, w, h, fromProgmem);
-}
-
 EInkDisplay::RefreshMode convertRefreshMode(HalDisplay::RefreshMode mode) {
   switch (mode) {
     case HalDisplay::FULL_REFRESH:
@@ -65,15 +62,29 @@ void HalDisplay::displayBuffer(HalDisplay::RefreshMode mode, bool turnOffScreen)
   einkDisplay.displayBuffer(convertRefreshMode(mode), turnOffScreen);
 }
 
-void HalDisplay::refreshDisplay(HalDisplay::RefreshMode mode, bool turnOffScreen) {
+void HalDisplay::displayBufferAsync(HalDisplay::RefreshMode mode) {
   if (gpio.deviceIsX3() && mode == RefreshMode::HALF_REFRESH) {
     einkDisplay.requestResync(1);
   }
 
-  einkDisplay.refreshDisplay(convertRefreshMode(mode), turnOffScreen);
+  einkDisplay.displayBufferAsyncNoShadow(convertRefreshMode(mode));
 }
 
+void HalDisplay::waitRefreshComplete() { einkDisplay.waitRefreshComplete(); }
+
+bool HalDisplay::supportsAsyncRefresh() const { return einkDisplay.supportsAsyncRefresh(); }
+
+HalDisplay::GrayscaleCapabilities HalDisplay::grayscaleCapabilities(GrayscaleMode mode) const {
+  return einkDisplay.grayscaleCapabilities(mode);
+}
+
+void HalDisplay::setInverted(bool inverted) { einkDisplay.setInverted(inverted); }
+
+bool HalDisplay::isInverted() const { return einkDisplay.isInverted(); }
+
 void HalDisplay::deepSleep() { einkDisplay.deepSleep(); }
+
+void HalDisplay::controllerIdle() { einkDisplay.controllerIdle(); }
 
 uint8_t* HalDisplay::getFrameBuffer() const { return einkDisplay.getFrameBuffer(); }
 
@@ -81,8 +92,9 @@ uint8_t* HalDisplay::lendFrameBufferStorage(uint32_t* sizeOut) { return einkDisp
 
 void HalDisplay::returnFrameBufferStorage() { einkDisplay.returnBuildStorage(); }
 
-void HalDisplay::copyGrayscaleBuffers(const uint8_t* lsbBuffer, const uint8_t* msbBuffer) {
-  einkDisplay.copyGrayscaleBuffers(lsbBuffer, msbBuffer);
+bool HalDisplay::displayGrayscaleBase(GrayscaleMode mode, RefreshMode fallback, bool turnOffScreen) {
+  if (gpio.deviceIsX3() && fallback == HALF_REFRESH) einkDisplay.requestResync();
+  return einkDisplay.displayGrayscaleBase(mode, static_cast<EInkDisplay::RefreshMode>(fallback), turnOffScreen);
 }
 
 void HalDisplay::displayGrayscaleBase(RefreshMode fallback, bool turnOffScreen) {
@@ -118,8 +130,6 @@ void HalDisplay::writeGrayscalePlaneStrip(bool lsbPlane, const uint8_t* rows, ui
   einkDisplay.writeGrayscalePlaneStrip(lsbPlane ? EInkDisplay::GRAY_PLANE_LSB : EInkDisplay::GRAY_PLANE_MSB, rows,
                                        yStart, numRows);
 }
-
-bool HalDisplay::supportsStripGrayscale() const { return einkDisplay.supportsStripGrayscale(); }
 
 uint16_t HalDisplay::getDisplayWidth() const { return einkDisplay.getDisplayWidth(); }
 

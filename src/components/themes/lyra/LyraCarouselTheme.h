@@ -11,6 +11,9 @@ constexpr ThemeMetrics values = [] {
   v.homeCoverHeight = 600;
   v.homeCoverTileHeight = 660;
   v.homeRecentBooksCount = 5;
+  // Lists use upstream's list/tab renderer: solid black (inverted) selected row and full-slot tab pill.
+  v.listSelectionStyle = 0;
+  v.tabPillFullSlot = true;
   return v;
 }();
 }  // namespace LyraCarouselMetrics
@@ -31,11 +34,4 @@ class LyraCarouselTheme : public LyraTheme {
                       const std::function<std::string(int index)>& buttonLabel,
                       const std::function<UIIcon(int index)>& rowIcon) const override;
   void drawCarouselBorder(GfxRenderer& renderer, Rect coverRect, bool inCarouselRow) const override;
-  void drawList(const GfxRenderer& renderer, Rect rect, int itemCount, int selectedIndex,
-                const std::function<std::string(int index)>& rowTitle,
-                const std::function<std::string(int index)>& rowSubtitle,
-                const std::function<UIIcon(int index)>& rowIcon, const std::function<std::string(int index)>& rowValue,
-                bool highlightValue, const std::function<bool(int index)>& rowDimmed = nullptr) const override;
-  void drawTabBar(const GfxRenderer& renderer, Rect rect, const std::vector<TabInfo>& tabs,
-                  bool selected) const override;
 };
