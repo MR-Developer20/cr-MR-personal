@@ -835,3 +835,5 @@ list is loaded when the screen opens and released when it closes. Format version
 Limits: 100 live items, 64 tombstones in `deleted` (the lowest `seq` is dropped first). Missing numbers and booleans
 read as `0` and `false`; a missing array reads as empty. An unreadable file is copied aside to `todo.json.bak` before
 anything is saved, so a later save cannot overwrite it with an empty list.
+
+The rules for syncing this list with a companion app are in [todo-sync-protocol.md](todo-sync-protocol.md).

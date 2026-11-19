@@ -22,6 +22,28 @@ struct TodoItem {
 enum class TodoEditResult : uint8_t { Ok, NoChange, EmptyText, ListFull, BadIndex };
 
 /**
+ * A phone's proposed state, already parsed (docs/todo-sync-protocol.md, C5). `items` are live
+ * records; `deleted` are tombstones (only id and rev are used).
+ */
+struct TodoIncoming {
+  uint32_t baseRev = 0;
+  std::vector<TodoItem> items;
+  std::vector<TodoItem> deleted;
+};
+
+enum class TodoApplyStatus : uint8_t {
+  Applied,    // List replaced; caller saves and answers 200 with the stored document.
+  Unchanged,  // Incoming equals the stored records; nothing changed (idempotent retry).
+  Conflict,   // baseRev is stale; caller answers 409 with the current document.
+  Invalid,    // Rejected before any change; caller answers 400 with `reason`.
+};
+
+struct TodoApplyResult {
+  TodoApplyStatus status = TodoApplyStatus::Invalid;
+  const char* reason = "";  // Static string; empty unless status is Invalid.
+};
+
+/**
  * Platform-independent to-do list model: no Arduino, SD or JSON dependencies, so it is
  * unit-tested on the host (test/todo_list). Persistence lives in src/TodoStore.
  *
@@ -57,6 +79,18 @@ class TodoList {
   TodoEditResult moveUp(size_t index);
   TodoEditResult moveDown(size_t index);
   size_t removeDone();  // Returns the number of items removed.
+
+  // --- Sync ---
+  // Applies a phone's state exactly as C5 steps 2-6 describe. All-or-nothing: on Conflict and
+  // Invalid the list is untouched. The text of `incoming` is sanitized in place and its records
+  // are moved into the list, so applyIncoming() itself builds no second copy of the list.
+  //
+  // Caller contract (this class knows nothing about locks, files or the dirty flag):
+  //  - the list must be loaded (TodoStore::load() reserves capacity, so the swap-in never reallocates);
+  //  - hold the RenderLock from this call until the response is serialized and the list is saved: the
+  //    render task reads the list, and TodoStore::toJson() stores text by reference;
+  //  - only on Applied: mark the store dirty. Unchanged, Conflict and Invalid must not write anything.
+  TodoApplyResult applyIncoming(TodoIncoming&& incoming);
 
   // --- Loading persisted state (no revision bumps) ---
   void clear();  // Empties the list and releases its heap memory.

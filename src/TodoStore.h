@@ -34,6 +34,22 @@ class TodoStore : public PersistableStore<TodoStore> {
   void toJson(JsonDocument& doc) const;
   bool fromJson(JsonVariantConst doc);
 
+  // Parses a phone's request body (a C1 document plus "baseRev") into `out`. Checks shape only: version 1,
+  // objects, ids, a well-formed baseRev, and the array-size limits (which bound the allocation, so they run
+  // here, before the baseRev conflict check). So a request with a stale baseRev AND an oversized array, a bad
+  // id or a bad baseRev gets this 400, not the 409 that applyIncoming would give: an app must not depend on a
+  // 409 in those cases. Text is sanitized as it is copied, so no raw text is kept.
+  // Everything else is TodoList::applyIncoming()'s job (docs/todo-sync-protocol.md). On failure `error`
+  // points to a static reason and `out` is emptied. It touches no shared state, so it may run without the
+  // RenderLock; responses reuse toJson().
+  //
+  // Memory plan for the transports (the list is ~21 KB at its limits, `out` about as much): size the
+  // request buffer from the announced length and refuse with "busy/out of memory" when it does not fit;
+  // free the request buffer and the JsonDocument before calling applyIncoming(); build `out` in a tight
+  // scope and destroy it before serializing the response; log free heap and largest block around the
+  // transfer, with the Bluetooth stack up, before fixing any limit.
+  static bool parseIncoming(JsonVariantConst body, TodoIncoming& out, const char*& error);
+
   // Loads the list. A missing file yields an empty list. An unreadable or newer-format
   // file is first copied aside to todo.json.bak so a later save can't destroy it.
   void load();

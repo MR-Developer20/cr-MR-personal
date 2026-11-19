@@ -1,5 +1,6 @@
 add_executable(TodoListTest
   TodoListTest.cpp
+  TodoApplyTest.cpp
   ${REPO_ROOT}/lib/TodoList/TodoList.cpp
 )
 

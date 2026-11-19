@@ -84,6 +84,54 @@ bool TodoStore::fromJson(JsonVariantConst doc) {
   return true;
 }
 
+bool TodoStore::parseIncoming(JsonVariantConst body, TodoIncoming& out, const char*& error) {
+  // Every failure empties `out`, so a rejected request never keeps its reserved memory.
+  const auto fail = [&out, &error](const char* reason) {
+    out = TodoIncoming{};
+    error = reason;
+    return false;
+  };
+  error = "";
+  out = TodoIncoming{};
+  if (!body.is<JsonObjectConst>()) return fail("body must be a JSON object");
+  // A missing version reads as 0 and is rejected like any other unsupported one.
+  if (body["version"].as<int>() != FORMAT_VERSION) return fail("unsupported version");
+
+  // baseRev decides whether the phone is current, so a value that does not fit a u32 must not quietly read
+  // as 0 (which would pass on a fresh list). A missing baseRev reads as 0, as C1 says for numbers.
+  const JsonVariantConst baseRev = body["baseRev"];
+  if (!baseRev.isNull() && !baseRev.is<uint32_t>()) return fail("bad baseRev");
+
+  const JsonArrayConst live = body["items"].as<JsonArrayConst>();
+  const JsonArrayConst gone = body["deleted"].as<JsonArrayConst>();
+  // Bound the allocation before making it: the limits are the contract's, not the parser's.
+  if (live.size() > TodoList::MAX_ITEMS) return fail("too many items");
+  if (gone.size() > TodoList::MAX_TOMBSTONES) return fail("too many tombstones");
+  out.baseRev = baseRev.as<uint32_t>();
+  out.items.reserve(live.size());
+  out.deleted.reserve(gone.size());
+
+  for (JsonVariantConst entry : live) {
+    const JsonObjectConst obj = entry.as<JsonObjectConst>();
+    TodoItem item;
+    if (obj.isNull() || !TodoList::hexToId(obj["id"] | "", item.id)) return fail("bad id");
+    // Sanitize at the point of copy: the raw text (up to the 32 KB body) is never stored.
+    item.text = TodoList::sanitizeText(obj["text"] | "");
+    item.done = obj["done"].as<bool>();
+    item.rev = obj["rev"].as<uint32_t>();
+    item.order = obj["order"].as<int32_t>();  // seq is device-local and deliberately ignored
+    out.items.push_back(std::move(item));
+  }
+  for (JsonVariantConst entry : gone) {
+    const JsonObjectConst obj = entry.as<JsonObjectConst>();
+    TodoItem item;
+    if (obj.isNull() || !TodoList::hexToId(obj["id"] | "", item.id)) return fail("bad id");
+    item.rev = obj["rev"].as<uint32_t>();
+    out.deleted.push_back(std::move(item));
+  }
+  return true;
+}
+
 void TodoStore::load() {
   dirty = false;
   loaded = true;

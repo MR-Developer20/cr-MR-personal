@@ -66,6 +66,24 @@ TEST(TodoListSanitize, TrimsSpaceLeftAtTheCut) {
   EXPECT_EQ(TodoList::sanitizeText(text), std::string(119, 'a'));
 }
 
+// The contract's C3 table (docs/todo-sync-protocol.md): the phone app must pass the same vectors.
+TEST(TodoListSanitize, ContractVectors) {
+  EXPECT_EQ(TodoList::sanitizeText("  buy\n\tmilk \r\n and  eggs  "), "buy milk and eggs");
+  EXPECT_EQ(TodoList::sanitizeText("a\x7f"
+                                   "b"),
+            "a b");
+  EXPECT_EQ(TodoList::sanitizeText(" \n\t "), "");
+  EXPECT_EQ(TodoList::sanitizeText(std::string(500, 'x')), std::string(120, 'x'));
+  EXPECT_EQ(TodoList::sanitizeText(std::string(119, 'a') + "\xC3\xA9" + "tail"), std::string(119, 'a'));
+  std::string euros41;
+  std::string euros40;
+  for (int i = 0; i < 41; ++i) euros41 += "\xE2\x82\xAC";
+  for (int i = 0; i < 40; ++i) euros40 += "\xE2\x82\xAC";
+  EXPECT_EQ(TodoList::sanitizeText(euros41), euros40);
+  EXPECT_EQ(euros40.size(), 120u);
+  EXPECT_EQ(TodoList::sanitizeText(std::string(119, 'a') + " bbbb"), std::string(119, 'a'));
+}
+
 // --- ids ---
 
 TEST(TodoListIds, HexRoundTrip) {

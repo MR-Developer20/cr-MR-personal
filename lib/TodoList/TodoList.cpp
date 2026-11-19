@@ -1,6 +1,7 @@
 #include "TodoList.h"
 
 #include <algorithm>
+#include <iterator>
 #include <limits>
 #include <utility>
 
@@ -12,6 +13,10 @@ bool displayOrderLess(const TodoItem& a, const TodoItem& b) {
   if (a.order != b.order) return a.order < b.order;
   return a.id < b.id;  // Deterministic tie-break when merged orders collide.
 }
+
+// Tombstones are kept oldest first so the cap drops the lowest seq. One named comparator, so every sort of
+// tombstones shares a single std::stable_sort instantiation.
+bool seqLess(const TodoItem& a, const TodoItem& b) { return a.seq < b.seq; }
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -211,6 +216,94 @@ size_t TodoList::removeDone() {
 }
 
 // ---------------------------------------------------------------------------
+// Sync
+// ---------------------------------------------------------------------------
+
+namespace {
+const TodoItem* findById(const std::vector<TodoItem>& records, const uint64_t id) {
+  for (const auto& record : records) {
+    if (record.id == id) return &record;
+  }
+  return nullptr;
+}
+
+bool sameContent(const TodoItem& a, const TodoItem& b) {
+  return a.rev == b.rev && a.text == b.text && a.done == b.done && a.order == b.order;
+}
+}  // namespace
+
+TodoApplyResult TodoList::applyIncoming(TodoIncoming&& incoming) {
+  using Status = TodoApplyStatus;
+  auto invalid = [](const char* reason) { return TodoApplyResult{Status::Invalid, reason}; };
+
+  // C5 step 2: a stale base means the phone has not seen this list's current state.
+  if (incoming.baseRev != listRev) return {Status::Conflict, ""};
+
+  // Step 3: validate everything before changing anything.
+  if (incoming.items.size() > MAX_ITEMS) return invalid("too many items");
+  if (incoming.deleted.size() > MAX_TOMBSTONES) return invalid("too many tombstones");
+
+  for (size_t i = 0; i < incoming.items.size(); ++i) {
+    TodoItem& item = incoming.items[i];
+    if (item.id == 0) return invalid("bad id");
+    item.text = sanitizeText(item.text);  // move-assign adopts the sanitized buffer (<= 121 B)
+    if (item.text.empty()) return invalid("empty text");
+  }
+  for (const auto& tombstone : incoming.deleted) {
+    if (tombstone.id == 0) return invalid("bad id");
+  }
+  // Ids must be unique across both arrays. At most 164 records, so the quadratic scan is cheap
+  // and needs no allocation.
+  const auto idAt = [&incoming](const size_t n) {
+    return n < incoming.items.size() ? incoming.items[n].id : incoming.deleted[n - incoming.items.size()].id;
+  };
+  const size_t total = incoming.items.size() + incoming.deleted.size();
+  for (size_t a = 0; a < total; ++a) {
+    for (size_t b = a + 1; b < total; ++b) {
+      if (idAt(a) == idAt(b)) return invalid("duplicate id");
+    }
+  }
+
+  // Step 4: a phone bug must not be able to wipe the list by leaving live ids out.
+  for (const auto& live : items) {
+    if (!findById(incoming.items, live.id) && !findById(incoming.deleted, live.id)) return invalid("missing id");
+  }
+
+  // Step 5: identical records are an idempotent retry, so no write and no revision bump.
+  bool same = incoming.items.size() == items.size() && incoming.deleted.size() == deleted.size();
+  for (size_t i = 0; same && i < incoming.items.size(); ++i) {
+    const TodoItem* stored = findById(items, incoming.items[i].id);
+    same = stored && sameContent(*stored, incoming.items[i]);
+  }
+  for (size_t i = 0; same && i < incoming.deleted.size(); ++i) {
+    const TodoItem* stored = findById(deleted, incoming.deleted[i].id);
+    same = stored && stored->rev == incoming.deleted[i].rev;
+  }
+  if (same) return {Status::Unchanged, ""};
+
+  // Step 6: new or changed records get a fresh seq in request order; unchanged ones keep theirs.
+  for (auto& item : incoming.items) {
+    const TodoItem* stored = findById(items, item.id);
+    item.seq = (stored && sameContent(*stored, item)) ? stored->seq : ++listRev;
+  }
+  for (auto& tombstone : incoming.deleted) {
+    const TodoItem* stored = findById(deleted, tombstone.id);
+    tombstone.text.clear();
+    tombstone.done = false;
+    tombstone.order = 0;
+    tombstone.seq = (stored && stored->rev == tombstone.rev) ? stored->seq : ++listRev;
+  }
+
+  std::stable_sort(incoming.items.begin(), incoming.items.end(), displayOrderLess);
+  std::stable_sort(incoming.deleted.begin(), incoming.deleted.end(), seqLess);
+
+  // assign() keeps the capacity reserved at load time, so the swap-in needs no allocation.
+  items.assign(std::make_move_iterator(incoming.items.begin()), std::make_move_iterator(incoming.items.end()));
+  deleted.assign(std::make_move_iterator(incoming.deleted.begin()), std::make_move_iterator(incoming.deleted.end()));
+  return {Status::Applied, ""};
+}
+
+// ---------------------------------------------------------------------------
 // Loading
 // ---------------------------------------------------------------------------
 
@@ -252,7 +345,7 @@ bool TodoList::loadTombstone(TodoItem item) {
 
 void TodoList::endLoad() {
   std::stable_sort(items.begin(), items.end(), displayOrderLess);
-  std::stable_sort(deleted.begin(), deleted.end(), [](const TodoItem& a, const TodoItem& b) { return a.seq < b.seq; });
+  std::stable_sort(deleted.begin(), deleted.end(), seqLess);
   if (deleted.size() > MAX_TOMBSTONES) {
     deleted.erase(deleted.begin(), deleted.end() - static_cast<std::ptrdiff_t>(MAX_TOMBSTONES));
   }
