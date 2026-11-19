@@ -187,7 +187,7 @@ bool Txt::validateCache(const std::string& filepath, const std::string& cachePat
 }
 
 bool Txt::buildTxtCache(const std::string& filepath, const std::string& cachePath,
-                        std::unique_ptr<BookMetadataCache>& bookMetadataCache) {
+                        std::unique_ptr<BookMetadataCache>& bookMetadataCache, const std::string& titleOverride) {
   LOG_DBG("TXT", "Building metadata cache for TXT: %s", filepath.c_str());
 
   if (!Storage.exists(cachePath.c_str())) {
@@ -218,7 +218,7 @@ bool Txt::buildTxtCache(const std::string& filepath, const std::string& cachePat
     return false;
   }
 
-  std::string title = FsHelpers::getFileNameWithoutExtension(filepath);
+  const std::string title = titleOverride.empty() ? FsHelpers::getFileNameWithoutExtension(filepath) : titleOverride;
   bool wroteHeadingToc = false;
   if (FsHelpers::hasMarkdownExtension(filepath)) {
     // One TOC entry per ATX heading, anchored to the id the converter puts on it.

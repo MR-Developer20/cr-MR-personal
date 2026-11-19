@@ -23,5 +23,6 @@ class Txt {
   static bool convertCoverImageToBmp(const std::string& imagePath, const std::string& destBmpPath, int thumbHeight = 0,
                                      bool cropped = false, bool originalThresholds = false, int thumbWidth = 0);
   static bool buildTxtCache(const std::string& filepath, const std::string& cachePath,
-                            std::unique_ptr<BookMetadataCache>& bookMetadataCache);
+                            std::unique_ptr<BookMetadataCache>& bookMetadataCache,
+                            const std::string& titleOverride = "");
 };

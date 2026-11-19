@@ -488,7 +488,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
           LOG_ERR("EBP", "OOM: TXT/MD metadata cache");
           return false;
         }
-        return Txt::buildTxtCache(filepath, cachePath, bookMetadataCache);
+        return Txt::buildTxtCache(filepath, cachePath, bookMetadataCache, textTitle);
       }
       LOG_DBG("EBP", "Loaded TXT/MD from cache: %s", filepath.c_str());
       return true;
@@ -549,7 +549,7 @@ bool Epub::load(const bool buildIfMissing, const bool skipLoadingCss) {
   }
 
   if (Txt::isTxtOrMd(filepath)) {
-    return Txt::buildTxtCache(filepath, cachePath, bookMetadataCache);
+    return Txt::buildTxtCache(filepath, cachePath, bookMetadataCache, textTitle);
   }
 
   // Cache doesn't exist or is invalid, build it
@@ -657,7 +657,7 @@ bool Epub::loadMetadata(std::string& title, std::string& author) {
   author.clear();
 
   if (Txt::isTxtOrMd(filepath)) {
-    title = utf8ComposeNfc(FsHelpers::getFileNameWithoutExtension(filepath));
+    title = utf8ComposeNfc(textTitle.empty() ? FsHelpers::getFileNameWithoutExtension(filepath) : textTitle);
     return true;
   }
 

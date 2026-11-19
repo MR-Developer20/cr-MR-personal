@@ -30,6 +30,8 @@ class Epub {
   std::string tocNavItem;
   // where is the EPUBfile?
   std::string filepath;
+  // Display title for a generated text book whose file name says nothing (JWPUB content.txt).
+  std::string textTitle;
   // the base path for items in the EPUB file
   std::string contentBasePath;
   // Uniq cache key based on filepath
@@ -62,6 +64,7 @@ class Epub {
   explicit Epub(std::string filepath, const std::string& cacheDir);
   ~Epub() = default;
   std::string& getBasePath() { return contentBasePath; }
+  void setTextTitle(std::string title) { textTitle = std::move(title); }
   bool load(bool buildIfMissing = true, bool skipLoadingCss = false);
   bool loadMetadata(std::string& title, std::string& author);
   bool loadSyncMetadata(SyncMetadata& metadata);

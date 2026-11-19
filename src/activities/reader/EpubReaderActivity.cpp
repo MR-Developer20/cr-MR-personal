@@ -12,6 +12,7 @@
 #include <HalPowerManager.h>
 #include <HalStorage.h>
 #include <I18n.h>
+#include <Jwpub.h>
 #include <Logging.h>
 #include <Memory.h>
 #include <TrustedTime.h>
@@ -249,11 +250,44 @@ EpubReaderActivity::~EpubReaderActivity() {
 }
 
 bool EpubReaderActivity::loadBook() {
-  auto loadedEpub = makeUniqueNoThrow<Epub>(bookPath, "/.crosspoint");
+  // A .jwpub is unpacked once into a plain-text file that the TXT pipeline then renders. The
+  // .jwpub path stays the book's identity (bookPath) for recents, Back and bookmarks.
+  std::string renderPath = bookPath;
+  std::string jwpubTitle;
+  if (FsHelpers::hasJwpubExtension(bookPath)) {
+    auto jwpub = makeUniqueNoThrow<Jwpub>(bookPath, "/.crosspoint");
+    if (!jwpub) {
+      LOG_ERR("ERS", "OOM: JWPUB object");
+      return false;
+    }
+    // First open: extracting + decrypting every document takes a few seconds; a cached open
+    // reuses content.txt almost instantly.
+    const bool jwpubUncached = !Storage.exists(jwpub->getContentPath().c_str());
+    if (jwpubUncached) {
+      disableFastInitialRefresh();
+      GUI.drawPopup(renderer, tr(STR_INDEXING));
+    }
+    bool jwpubLoaded;
+    {
+      // Lend the framebuffer's 48 KB to the conversion (the inflate window claims from it).
+      std::optional<GfxRenderer::FrameBufferLoan> loan;
+      if (jwpubUncached) loan.emplace(renderer);
+      jwpubLoaded = jwpub->load();
+    }
+    if (!jwpubLoaded) {
+      LOG_ERR("ERS", "Failed to load JWPUB: %s", bookPath.c_str());
+      return false;
+    }
+    renderPath = jwpub->getContentPath();
+    jwpubTitle = jwpub->getTitle();
+  }
+
+  auto loadedEpub = makeUniqueNoThrow<Epub>(renderPath, "/.crosspoint");
   if (!loadedEpub) {
     LOG_ERR("ERS", "Failed to allocate EPUB object");
     return false;
   }
+  if (!jwpubTitle.empty()) loadedEpub->setTextTitle(jwpubTitle);
 
   const bool uncached = !Storage.exists((loadedEpub->getCachePath() + "/book.bin").c_str());
   if (uncached) {
@@ -804,16 +838,16 @@ void EpubReaderActivity::loop() {
 
   if (SETTINGS.removeReadBooksFromRecents) {
     if (atEndOfBook && !recentsEntryRemoved) {
-      recentsEntryRemoved = RECENT_BOOKS.removeByPath(epub->getPath());
+      recentsEntryRemoved = RECENT_BOOKS.removeByPath(bookPath);
     } else if (!atEndOfBook && recentsEntryRemoved) {
-      RECENT_BOOKS.addBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
+      RECENT_BOOKS.addBook(bookPath, epub->getTitle(), epub->getAuthor(), epub->getThumbBmpPath());
       recentsEntryRemoved = false;
     }
   }
 
   if (atEndOfBook) {
-    pendingReadFolderMove = SETTINGS.moveFinishedToReadFolder && epub->getPath() == bookPath &&
-                            !isInReadFolder(bookPath);
+    pendingReadFolderMove =
+        SETTINGS.moveFinishedToReadFolder && epub->getPath() == bookPath && !isInReadFolder(bookPath);
   } else {
     pendingReadFolderMove = false;
   }
@@ -1362,9 +1396,8 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       break;
     }
     case EpubReaderMenuActivity::MenuAction::BOOKMARKS: {
-      startActivityForResult(
-          std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub, bookPath),
-          progressChangeResultHandler);
+      startActivityForResult(std::make_unique<EpubReaderBookmarksActivity>(renderer, mappedInput, epub, bookPath),
+                             progressChangeResultHandler);
       break;
     }
     case EpubReaderMenuActivity::MenuAction::SAVE_CLIPPING: {
@@ -3433,7 +3466,7 @@ void EpubReaderActivity::loadCachedBookmarks() {
     return;
   }
 
-  BookmarkFile::load(epub->getPath(), cachedBookmarks);
+  BookmarkFile::load(bookPath, cachedBookmarks);
   updateBookmarkFlag();
 }
 
@@ -3487,7 +3520,7 @@ void EpubReaderActivity::addBookmark() {
     currentPageBookmarked = true;
   }
 
-  if (!BookmarkFile::save(epub->getPath(), cachedBookmarks)) {
+  if (!BookmarkFile::save(bookPath, cachedBookmarks)) {
     LOG_ERR("ERS", "Failed to save bookmarks");
   }
   requestUpdate();
