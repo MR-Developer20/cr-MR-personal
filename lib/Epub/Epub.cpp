@@ -972,12 +972,20 @@ bool Epub::generateThumbBmpAt(const std::string& thumbPath, int targetWidth, int
 }
 
 bool Epub::generateThumbBmpFromSource(int height) {
-  if (Storage.exists(getThumbBmpPath(height).c_str())) return true;
+  return generateThumbBmpFromSourceAt(getThumbBmpPath(height), static_cast<int>(height * 0.6), height);
+}
+
+bool Epub::generateThumbBmpFromSource(int width, int height) {
+  return generateThumbBmpFromSourceAt(getThumbBmpPath(width, height), width, height);
+}
+
+bool Epub::generateThumbBmpFromSourceAt(const std::string& thumbPath, int targetWidth, int targetHeight) {
+  if (Storage.exists(thumbPath.c_str())) return true;
   if (Txt::isTxtOrMd(filepath)) {
     std::string companionCover = Txt::findCompanionCoverImage(filepath);
     if (companionCover.empty()) return false;
     setupCacheDir();
-    return generateThumbBmpForCover(getThumbBmpPath(height), static_cast<int>(height * 0.6), height, companionCover);
+    return generateThumbBmpForCover(thumbPath, targetWidth, targetHeight, companionCover);
   }
   // Parser input and metadata outlive parsing but exceed the small task stack budget.
   auto metadata = makeUniqueNoThrow<BookMetadataCache::BookMetadata>();
@@ -995,8 +1003,7 @@ bool Epub::generateThumbBmpFromSource(int height) {
   // The cover of a protected book is encrypted like everything else.
   if (!decryptor && !openProtection()) return false;
   setupCacheDir();
-  return generateThumbBmpForCover(getThumbBmpPath(height), static_cast<int>(height * 0.6), height,
-                                  metadata->coverItemHref);
+  return generateThumbBmpForCover(thumbPath, targetWidth, targetHeight, metadata->coverItemHref);
 }
 
 bool Epub::generateThumbBmpForCover(const std::string& thumbPath, int targetWidth, int targetHeight,

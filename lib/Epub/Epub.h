@@ -59,6 +59,7 @@ class Epub {
   void discoverCssFilesFromZip();
   CssParser::ParseResult parseCssFiles(CssParser::CacheStatus existingCacheStatus) const;
   bool generateThumbBmpAt(const std::string& thumbPath, int targetWidth, int targetHeight) const;
+  bool generateThumbBmpFromSourceAt(const std::string& thumbPath, int targetWidth, int targetHeight);
 
  public:
   explicit Epub(std::string filepath, const std::string& cacheDir);
@@ -86,6 +87,8 @@ class Epub {
   bool generateThumbBmp(int width, int height) const;
   // Locate the cover without building spine, TOC, or reading caches.
   bool generateThumbBmpFromSource(int height);
+  // Exact-size variant (thumb_<w>x<h>.bmp) for the Lyra Carousel home theme.
+  bool generateThumbBmpFromSource(int width, int height);
   uint8_t* readItemContentsToBytes(const std::string& itemHref, size_t* size = nullptr,
                                    bool trailingNullByte = false) const;
   bool readItemContentsToStream(const std::string& itemHref, Print& out, size_t chunkSize,

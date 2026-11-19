@@ -6,6 +6,7 @@
 #include "RecentBooksStore.h"
 #include "activities/Activity.h"
 #include "components/CoverGridHomeUi.h"
+#include "components/themes/BaseTheme.h"
 #include "util/ButtonNavigator.h"
 
 struct Rect;
@@ -93,6 +94,8 @@ class HomeActivity final : public Activity {
   bool storeCoverBuffer();    // Store frame buffer for cover image
   bool restoreCoverBuffer();  // Restore frame buffer from stored cover
   void freeCoverBuffer();     // Free the stored cover buffer
+  // Standard icon-menu labels/icons (Browse, Library, optional Plugins/OPDS slot, Transfer, Settings).
+  void appendHomeMenu(std::vector<const char*>& items, std::vector<UIIcon>& icons) const;
   void preRenderCarouselFrames();
   void freeCarouselFrames();
   void renderCarouselFrame(int bookIdx, int slotIdx);
