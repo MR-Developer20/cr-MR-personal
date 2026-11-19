@@ -63,7 +63,7 @@ void TodoActivity::clampSelection() {
 
 // Runs on the render task (inside the render lock), once per visible row.
 void TodoActivity::provideRow(void* ctx, const uint16_t index, fui::ListItem& item) {
-  auto* self = static_cast<TodoActivity*>(ctx);
+  const auto* self = static_cast<const TodoActivity*>(ctx);
   const auto& list = TODO_STORE.list();
   if (index < list.size()) {
     const TodoItem& todo = list.at(index);
