@@ -251,6 +251,7 @@ families:
 
   - name: iAWriterQuattro
     description: "iA Writer's screen-reading humanist sans (Latin)"
+    scripts: [latin]
     intervals: latin-ext
     sizes: [12, 14, 16, 18]
     styles:
