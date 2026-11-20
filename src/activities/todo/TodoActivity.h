@@ -10,9 +10,11 @@
 /**
  * To-do list screen.
  *
- * Rows are the live items followed by a virtual "+ Add item" row.
+ * Rows are the live items followed by a virtual "+ Add item" row and, in builds with Bluetooth, a
+ * "Sync with phone" row.
  *   Confirm / tap   on an item: check / uncheck it
  *   Confirm / tap   on "+ Add item": open the keyboard to add one
+ *   Confirm / tap   on "Sync with phone": open the Bluetooth sync screen
  *   Hold Confirm / long-press on an item: options popup (edit, move, delete, delete completed)
  *   Back: return home
  *
@@ -52,12 +54,16 @@ class TodoActivity final : public UiListActivity {
 
   static void provideRow(void* ctx, uint16_t index, freeink::ui::ListItem& item);
 
+  bool isItemRow(int index) const;
   bool isAddRow(int index) const;
+  bool isSyncRow(int index) const;
+  static bool syncAvailable();
   void clampSelection();
 
   void openMenu();
   void runMenuAction(ItemAction action);
   void openKeyboard(int itemIndex);  // -1 adds a new item.
+  void openSync();
   void promptDeleteDone();
   void showMessage(const char* message);
   // Caller must hold the RenderLock.

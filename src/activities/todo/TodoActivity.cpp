@@ -1,6 +1,7 @@
 #include "TodoActivity.h"
 
 #include <Arduino.h>
+#include <BlePageTurner.h>
 #include <GfxRenderer.h>
 #include <I18n.h>
 #include <Logging.h>
@@ -12,6 +13,7 @@
 
 #include "MappedInputManager.h"
 #include "TodoStore.h"
+#include "TodoSyncActivity.h"
 #include "activities/util/ConfirmationActivity.h"
 #include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
@@ -51,9 +53,22 @@ void TodoActivity::onExit() {
 // Rows and input
 // ---------------------------------------------------------------------------
 
-int TodoActivity::listCount() const { return static_cast<int>(TODO_STORE.list().size()) + 1; }
+// The "Sync with phone" row only exists in builds that carry the Bluetooth stack.
+bool TodoActivity::syncAvailable() { return bleturner::status().compiledIn; }
 
-bool TodoActivity::isAddRow(const int index) const { return index >= static_cast<int>(TODO_STORE.list().size()); }
+int TodoActivity::listCount() const {
+  return static_cast<int>(TODO_STORE.list().size()) + 1 + (syncAvailable() ? 1 : 0);
+}
+
+bool TodoActivity::isItemRow(const int index) const {
+  return index >= 0 && index < static_cast<int>(TODO_STORE.list().size());
+}
+
+bool TodoActivity::isAddRow(const int index) const { return index == static_cast<int>(TODO_STORE.list().size()); }
+
+bool TodoActivity::isSyncRow(const int index) const {
+  return syncAvailable() && index == static_cast<int>(TODO_STORE.list().size()) + 1;
+}
 
 void TodoActivity::clampSelection() {
   const int last = listCount() - 1;
@@ -71,6 +86,8 @@ void TodoActivity::provideRow(void* ctx, const uint16_t index, fui::ListItem& it
     GUI.setCheckboxRow(item, todo.done);
   } else if (self->isAddRow(index)) {
     item.label = tr(STR_TODO_ADD_ITEM);
+  } else if (self->isSyncRow(index)) {
+    item.label = tr(STR_TODO_SYNC);
   }
   item.actionValue = static_cast<int16_t>(index);
 }
@@ -98,6 +115,10 @@ void TodoActivity::activateIndex(const int index) {
   app.clearTapFlash();
   // Loop task: take the lock around anything the render task reads.
   RenderLock lock(*this);
+  if (isSyncRow(index)) {
+    openSync();
+    return;
+  }
   if (isAddRow(index)) {
     // Say so now, while the list is on screen, rather than after the user has typed an item.
     if (TODO_STORE.list().isFull()) {
@@ -112,7 +133,7 @@ void TodoActivity::activateIndex(const int index) {
 }
 
 void TodoActivity::onRowLongPress(const int index) {
-  if (isAddRow(index)) return;
+  if (!isItemRow(index)) return;
   nav.selected = index;
   openMenu();
 }
@@ -127,7 +148,7 @@ bool TodoActivity::handleCustomInput() {
 bool TodoActivity::handleButtons() {
   if (mappedInput.wasLongPressed(MappedInputManager::Button::Confirm, LONG_PRESS_MS)) {
     // The matching release is suppressed by wasLongPressed(), so it won't also toggle the item.
-    if (!isAddRow(nav.selected)) {
+    if (isItemRow(nav.selected)) {
       app.clearTapFlash();
       openMenu();
     }
@@ -143,7 +164,7 @@ void TodoActivity::onBackButton() { onGoHome(); }
 // ---------------------------------------------------------------------------
 
 void TodoActivity::openMenu() {
-  if (optionPopup.isActive() || isAddRow(nav.selected)) return;
+  if (optionPopup.isActive() || !isItemRow(nav.selected)) return;
   const auto& list = TODO_STORE.list();
   const auto index = static_cast<size_t>(nav.selected);
 
@@ -228,6 +249,26 @@ void TodoActivity::openKeyboard(const int itemIndex) {
   startActivityForResult(std::move(keyboard), std::move(handler));
 }
 
+// Caller holds the RenderLock. The phone replaces the list in TODO_STORE, so unsaved edits go to the card first.
+void TodoActivity::openSync() {
+  if (!TODO_STORE.saveIfDirty()) {
+    showMessage(tr(STR_TODO_SAVE_FAILED));
+    requestUpdate();
+    return;
+  }
+  auto sync = makeUniqueNoThrow<TodoSyncActivity>(renderer, mappedInput);
+  if (!sync) {
+    LOG_ERR("TODO", "OOM: sync activity");
+    return;
+  }
+  // The sync saves what it applies. Result handlers run without the render lock.
+  startActivityForResult(std::move(sync), [this](const ActivityResult&) {
+    RenderLock lock(*this);
+    clampSelection();
+    requestUpdate();
+  });
+}
+
 void TodoActivity::promptDeleteDone() {
   char body[48];
   snprintf(body, sizeof(body), tr(STR_TODO_DONE_COUNT), static_cast<int>(TODO_STORE.list().doneCount()));
@@ -298,8 +339,8 @@ void TodoActivity::drawChrome() {
 }
 
 void TodoActivity::drawFooter() {
-  const char* confirmLabel = tr(STR_TODO_ADD);
-  if (!isAddRow(nav.selected)) {
+  const char* confirmLabel = isSyncRow(nav.selected) ? tr(STR_CONFIRM) : tr(STR_TODO_ADD);
+  if (isItemRow(nav.selected)) {
     confirmLabel =
         TODO_STORE.list().at(static_cast<size_t>(nav.selected)).done ? tr(STR_TODO_UNCHECK) : tr(STR_TODO_CHECK);
   }

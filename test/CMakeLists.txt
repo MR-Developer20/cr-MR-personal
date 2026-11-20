@@ -108,6 +108,7 @@ add_subdirectory(ble_link_note_title)
 add_subdirectory(ble_chapter_build_gate)
 add_subdirectory(ble_remote_turn_gate)
 add_subdirectory(todo_list)
+add_subdirectory(todo_sync)
 
 add_subdirectory(${REPO_ROOT}/lib/BlePageTurner/test BlePageTurnerTests)
 

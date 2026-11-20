@@ -664,6 +664,8 @@ Open **To-do** from the Home Screen to keep a simple checklist on the device. Th
 
 Changes are saved when you leave the screen, and also 10 seconds after your last change. If `todo.json` can't be read, it is renamed to `todo.json.bak` instead of being overwritten.
 
+**Sync with phone** (last row, builds with Bluetooth) opens a screen that makes the device visible to the companion app for 3 minutes. Start a sync in the app; the first time, your phone asks for the six-digit pairing code shown on the device screen. A new code is made each time you open the screen. The phone merges its list with the device list and sends the result back, and the device replaces its list with it. The screen then says **Synced**, or says why it did not work (for example **Changed on both sides. Sync again.** or **Not enough memory**). The Bluetooth page turner is off while this screen is open, and the radio is switched off when you leave it or when the 3 minutes pass with no phone. Pairing a phone uses one of the Bluetooth bond slots that page-turner remotes also use; if the slots are full, the oldest pairing is dropped.
+
 ## 4. Reading Mode
 
 Once you have opened a book, the button layout changes to facilitate reading.

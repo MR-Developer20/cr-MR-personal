@@ -159,3 +159,14 @@ Flows:
   - On any other error X sends `ERR(code)`.
 - One transfer at a time. A new `GET` or `PUT_BEGIN` aborts any partial transfer.
 
+## Firmware notes (Bluetooth)
+
+Details of the X4 firmware that the shared contract above leaves open. They do not change the wire format.
+
+- **Frame `seq`.** `CHUNK` and `PUT_CHUNK` frames count from 0 within one transfer. The device checks this and aborts the PUT on a gap or repeat (`ERR 5`). `GET`, `PUT_BEGIN` and `PUT_COMMIT` carry `seq` 0 and the device ignores it. The device sends `END` with `seq` equal to the number of chunks, and `OK`/`ERR` with `seq` 0.
+- **Memory and `maxBody`.** The device sizes its receive buffer from the `PUT_BEGIN` length. It accepts a body only when about three times its length is free (the body, the parsed document and the stored list exist together), and otherwise answers `ERR 6`. The Info value `maxBody` is that limit at the time Info was written, so it can be lower than 32768 on a device with little free memory. An app must not send a body larger than the `maxBody` it read. It re-reads Info after each connection.
+- **Security.** Reading Info needs an encrypted link. Writing Command needs an encrypted, authenticated (MITM) link. The Data characteristic has no permission of its own beyond subscribing: it only carries notifications that answer a Command, so no data flows before an authenticated pairing. This is weaker than the "encrypted + MITM" wording for Data in C7.
+- **Bonds.** A pairing is stored in the Bluetooth stack's bond store (6 slots), which the Bluetooth page turner shares. When the store is full the oldest bond is dropped, which can be a page-turner remote that then has to be paired again.
+- **Pairing code.** The six-digit code is random and changes every time the Sync screen opens.
+- **Busy.** While a `GET` or `PUT_COMMIT` is queued or running, the device answers a new `GET`, `PUT_BEGIN` or `PUT_COMMIT` with `ERR 6`.
+- **Sessions.** One phone is connected at a time. After a transfer the connection stays open until the phone disconnects or the user leaves the screen. Advertising stops 180 s after the screen opens if no phone connected.
